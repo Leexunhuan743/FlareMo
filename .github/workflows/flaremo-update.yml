@@ -2,7 +2,7 @@ name: Prepare FlareMo update
 
 on:
   schedule:
-    - cron: "43 4 * * *"
+    - cron: "43 4 */3 * *"
   workflow_dispatch:
     inputs:
       version:
