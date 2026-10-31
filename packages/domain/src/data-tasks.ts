@@ -13,6 +13,7 @@ import {
   shares,
 } from "@flaremo/db";
 import { and, asc, desc, eq, gt, inArray, lt, or } from "drizzle-orm";
+import { chunkForD1, d1IdsPerStatement } from "./d1-limits";
 import { NotFoundError } from "./errors";
 import { importData } from "./import-export";
 
@@ -76,6 +77,35 @@ export async function getDataTask(db: FlareMoDb, user: UserRow, id: string) {
 }
 
 /**
+ * Read a task row without the session-ownership check. Queue consumers and
+ * the cron reconciler act on task ids rather than on behalf of the session
+ * user, so they resolve the owner from the row itself.
+ */
+export async function getDataTaskById(db: FlareMoDb, id: string) {
+  return db.select().from(dataTasks).where(eq(dataTasks.id, id)).get();
+}
+
+/**
+ * Claim a queued task for execution: flip `queued` to `running` and renew the
+ * lease in one conditional update, mirroring claimMemberRemovalJob. Any other
+ * status — succeeded, failed, or a lease still held by an in-flight run —
+ * returns false, which keeps queue redeliveries and doubled sends as no-ops.
+ */
+export async function claimQueuedDataTask(db: FlareMoDb, id: string) {
+  const now = new Date();
+  const result = await db
+    .update(dataTasks)
+    .set({
+      status: "running",
+      phase: "scanning",
+      leaseUntil: new Date(now.getTime() + DATA_TASK_LEASE_MS).toISOString(),
+      updatedAt: now.toISOString(),
+    })
+    .where(and(eq(dataTasks.id, id), eq(dataTasks.status, "queued")));
+  return result.meta?.changes === 1;
+}
+
+/**
  * List the user's data-transfer tasks, newest first.
  */
 export async function listDataTasks(db: FlareMoDb, user: UserRow, limit = 20) {
@@ -85,6 +115,21 @@ export async function listDataTasks(db: FlareMoDb, user: UserRow, limit = 20) {
     .where(eq(dataTasks.userId, user.id))
     .orderBy(desc(dataTasks.createdAt))
     .limit(limit)
+    .all();
+}
+
+/**
+ * Bounded cron fallback for export jobs whose Queue delivery was missed.
+ * Imports are never claimed here because their conflict strategy is not safe
+ * to replay in the background.
+ */
+export async function listQueuedDataExportTasks(db: FlareMoDb, limit = 5) {
+  return db
+    .select()
+    .from(dataTasks)
+    .where(and(eq(dataTasks.kind, "export"), eq(dataTasks.status, "queued")))
+    .orderBy(asc(dataTasks.createdAt))
+    .limit(Math.min(Math.max(limit, 1), 5))
     .all();
 }
 
@@ -160,22 +205,21 @@ export async function expireStaleDataTasks(
     )
     .all();
   if (stale.length === 0) return 0;
-  await db
-    .update(dataTasks)
-    .set({
-      status: "failed",
-      errorCode: "task_expired",
-      errorMessage:
-        "Task lease expired before completion; the request was interrupted.",
-      completedAt: now.toISOString(),
-      updatedAt: now.toISOString(),
-    })
-    .where(
-      inArray(
-        dataTasks.id,
-        stale.map((row) => row.id),
-      ),
-    );
+  const staleIds = stale.map((row) => row.id);
+  // One bound parameter per id; chunk so a long-stalled queue still drains.
+  for (const idChunk of chunkForD1(staleIds, d1IdsPerStatement())) {
+    await db
+      .update(dataTasks)
+      .set({
+        status: "failed",
+        errorCode: "task_expired",
+        errorMessage:
+          "Task lease expired before completion; the request was interrupted.",
+        completedAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+      })
+      .where(inArray(dataTasks.id, idChunk));
+  }
   return stale.length;
 }
 
@@ -202,7 +246,9 @@ export async function deleteExpiredDataTasks(
     .all();
   if (expired.length === 0) return [];
   const ids = expired.map((row) => row.id);
-  await db.delete(dataTasks).where(inArray(dataTasks.id, ids));
+  for (const idChunk of chunkForD1(ids, d1IdsPerStatement())) {
+    await db.delete(dataTasks).where(inArray(dataTasks.id, idChunk));
+  }
   return ids;
 }
 
@@ -304,8 +350,9 @@ export async function streamExportData(
   // Relations restricted to memos owned by the user.
   const relationRecords: string[] = [];
   const memoIdList = Array.from(allMemoIds);
-  for (let offset = 0; offset < memoIdList.length; offset += pageSize) {
-    const memoIdChunk = memoIdList.slice(offset, offset + pageSize);
+  // `pageSize` (500) is the export page, not a safe binding count: an
+  // `inArray` of 500 ids is five times D1's 100-parameter ceiling.
+  for (const memoIdChunk of chunkForD1(memoIdList, d1IdsPerStatement())) {
     const relationRows = await db
       .select()
       .from(memoRelations)

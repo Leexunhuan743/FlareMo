@@ -25,7 +25,7 @@ export function ReadingAudioBar({ className }: { className?: string }) {
   return (
     <div
       className={cn(
-        "sticky top-2 z-20 flex flex-col gap-1.5 rounded-xl border border-border/60 bg-card/95 px-3 py-2.5 shadow-sm backdrop-blur-md",
+        "glass sticky top-2 z-20 flex flex-col gap-1.5 rounded-xl px-3 py-2.5",
         className,
       )}
     >
@@ -73,7 +73,7 @@ export function ReadingAudioBar({ className }: { className?: string }) {
           ))}
           <Toggle
             aria-label={t("reading.follow")}
-            className="h-6 px-2 text-[0.7rem]"
+            className="h-6 px-2 text-xs"
             onPressedChange={audio.setFollow}
             pressed={follow}
             size="sm"
@@ -95,7 +95,7 @@ export function ReadingAudioBar({ className }: { className?: string }) {
       <div className="flex flex-wrap items-center gap-1.5">
         <a
           aria-label={t("reading.downloadAudio")}
-          className="flex min-w-0 max-w-56 items-center gap-1.5 rounded-md bg-muted px-2 py-0.5 text-[0.7rem] text-muted-foreground transition-colors hover:text-foreground"
+          className="flex min-w-0 max-w-56 items-center gap-1.5 rounded-md bg-muted px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
           href={track.downloadUrl}
           title={`${track.filename} · ${formatBytes(track.sizeBytes)}`}
         >
@@ -106,7 +106,7 @@ export function ReadingAudioBar({ className }: { className?: string }) {
           audio.tracks.map((item) => (
             <button
               className={cn(
-                "max-w-56 truncate rounded-md px-2 py-0.5 text-[0.7rem] transition-colors",
+                "max-w-56 truncate rounded-md px-2 py-0.5 text-xs transition-colors",
                 item.id === track.id
                   ? "bg-brand-50 text-brand-700 dark:bg-brand-400/12 dark:text-brand-200"
                   : "bg-muted text-muted-foreground hover:text-foreground",

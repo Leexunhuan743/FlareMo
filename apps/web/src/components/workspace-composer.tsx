@@ -1,5 +1,7 @@
 import type { MemoVisibility } from "@flaremo/contracts";
+import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
+import { CloudOffIcon } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import type { MemoSpace } from "@/api";
@@ -14,13 +16,16 @@ import {
   getNewMemoDraftId,
   isBrowserOnline,
   isMemoCaptureEmpty,
+  listQueuedMemoSubmissions,
   type MemoCaptureInput,
 } from "@/lib/local-memo-capture";
+import { fileScheduledTasks } from "@/lib/memo-schedule";
 import {
   shouldContinueQueuedSubmissionAfterFailure,
   shouldQueueAfterFailure,
   validateMemoCaptureSubmission,
 } from "@/lib/memo-submission";
+import { queryKeys } from "@/lib/query-keys";
 
 // The composer's send target defaults to the active space ("归属在创建时决定").
 // An explicit pick is remembered per space so a member who publishes to the
@@ -79,6 +84,55 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
   });
   const { createMemoAsync, isCreatingMemo, handleMutationError } =
     useMemoMutations();
+  const queryClient = useQueryClient();
+  // A scheduled memo files its to-dos as tasks once the memo exists. The
+  // memo is the durable part: a task failure is reported, never rolled back
+  // into a lost note. Returns the toast the send should show.
+  const createMemoAndSchedule = useCallback(
+    async (submission: MemoCaptureInput) => {
+      const memo = await createMemoAsync(submission);
+      if (!submission.schedule) return { memo, message: t("toast.saved") };
+      try {
+        const count = await fileScheduledTasks(
+          memo.name,
+          submission.content,
+          submission.schedule,
+        );
+        void queryClient.invalidateQueries({ queryKey: queryKeys.tasks.all });
+        void queryClient.invalidateQueries({ queryKey: ["projects"] });
+        return {
+          memo,
+          message:
+            count > 0 ? t("toast.scheduledTasks", { count }) : t("toast.saved"),
+        };
+      } catch {
+        toast.error(t("toast.scheduleFailed"));
+        return { memo, message: undefined };
+      }
+    },
+    [createMemoAsync, queryClient, t],
+  );
+  // A quiet, persistent notice while offline or while notes wait in the
+  // local queue; the toasts alone vanish and leave the user guessing.
+  const [online, setOnline] = useState(isBrowserOnline);
+  const [queuedCount, setQueuedCount] = useState(0);
+  const refreshQueuedCount = useCallback(async () => {
+    try {
+      setQueuedCount((await listQueuedMemoSubmissions()).length);
+    } catch {
+      setQueuedCount(0);
+    }
+  }, []);
+  useEffect(() => {
+    void refreshQueuedCount();
+    const sync = () => setOnline(isBrowserOnline());
+    window.addEventListener("online", sync);
+    window.addEventListener("offline", sync);
+    return () => {
+      window.removeEventListener("online", sync);
+      window.removeEventListener("offline", sync);
+    };
+  }, [refreshQueuedCount]);
   const isQueueFlushing = useRef(false);
   const isQueueFlushPending = useRef(false);
   const isCaptureSubmitting = useRef(false);
@@ -116,7 +170,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
       do {
         isQueueFlushPending.current = false;
         const result = await flushQueuedMemoSubmissions(
-          (submission) => createMemoAsync(submission),
+          async (submission) => (await createMemoAndSchedule(submission)).memo,
           {
             shouldContinueAfterFailure:
               shouldContinueQueuedSubmissionAfterFailure,
@@ -133,8 +187,9 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
       }
     } finally {
       isQueueFlushing.current = false;
+      void refreshQueuedCount();
     }
-  }, [createMemoAsync, t]);
+  }, [createMemoAndSchedule, refreshQueuedCount, t]);
 
   useEffect(() => {
     void flushQueuedCaptures();
@@ -184,14 +239,15 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
           throw error;
         }
         await capture.discardDraft();
+        void refreshQueuedCount();
         toast.success(t("toast.queuedForSync"));
         return;
       }
 
       try {
-        await createMemoAsync(submission);
+        const { message } = await createMemoAndSchedule(submission);
         await capture.discardDraft();
-        toast.success(t("toast.saved"));
+        if (message) toast.success(message);
       } catch (error) {
         if (!shouldQueueAfterFailure(error)) {
           handleMutationError(error);
@@ -204,6 +260,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
           throw error;
         }
         await capture.discardDraft();
+        void refreshQueuedCount();
         toast.success(t("toast.queuedForSync"));
       }
     } finally {
@@ -213,22 +270,36 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
   };
 
   if (!visible) return null;
+  const showOfflineNotice = !online || queuedCount > 0;
   return (
-    <MemoComposer
-      draft={capture.draft}
-      isPending={isCreatingMemo || isCaptureSubmissionPending}
-      showVisibility={hasTeam}
-      tags={tags}
-      captureAvailable={captureAvailable}
-      onDraftChange={capture.updateDraft}
-      onVisibilityChange={(visibility) => {
-        setVisibilityPref((current) => {
-          const next = { ...current, [space]: visibility };
-          writeVisibilityPref(next);
-          return next;
-        });
-      }}
-      onSubmit={handleCaptureSubmit}
-    />
+    <>
+      {showOfflineNotice && (
+        <div
+          className="flex items-center gap-2 rounded-lg border border-dashed border-border/70 bg-muted/40 px-3 py-2 text-xs text-muted-foreground motion-safe:animate-rise"
+          role="status"
+        >
+          <CloudOffIcon aria-hidden="true" className="size-3.5 shrink-0" />
+          {queuedCount > 0
+            ? t("composer.offlinePending", { count: queuedCount })
+            : t("composer.offlineNotice")}
+        </div>
+      )}
+      <MemoComposer
+        draft={capture.draft}
+        isPending={isCreatingMemo || isCaptureSubmissionPending}
+        showVisibility={hasTeam}
+        tags={tags}
+        captureAvailable={captureAvailable}
+        onDraftChange={capture.updateDraft}
+        onVisibilityChange={(visibility) => {
+          setVisibilityPref((current) => {
+            const next = { ...current, [space]: visibility };
+            writeVisibilityPref(next);
+            return next;
+          });
+        }}
+        onSubmit={handleCaptureSubmit}
+      />
+    </>
   );
 });

@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { ListPlusIcon } from "lucide-react";
 import {
   Children,
@@ -9,10 +10,17 @@ import {
   useState,
 } from "react";
 import Markdown from "react-markdown";
+import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { useI18n } from "@/i18n";
 import { createSlugger } from "@/lib/markdown-outline";
 import { memoTaskLines } from "@/lib/memo-tasks";
+import {
+  protectLiteralLayout,
+  remarkLiteralBreaks,
+  remarkLiteralHashes,
+} from "@/lib/remark-literal";
+import { mentionFromHref, remarkTags, tagFromHref } from "@/lib/remark-tags";
 import {
   isTimestampHref,
   parseTimestampHref,
@@ -105,9 +113,13 @@ export const MemoContent = memo(function MemoContent({
   resolveImageDimensions,
   onToggleTask,
   onConvertTask,
+  onTagClick,
+  rehypePlugins,
 }: {
   className?: string;
   content: string;
+  /** Makes in-text `#tags` filter the timeline; without it they are inert. */
+  onTagClick?: (tag: string) => void;
   /**
    * Turns timestamp anchors into seek controls. Without it they stay inert,
    * which is what the timeline card wants.
@@ -132,11 +144,19 @@ export const MemoContent = memo(function MemoContent({
   resolveImageDimensions?: (
     src: string,
   ) => { width: number; height: number } | undefined;
+  /**
+   * Article-surface extras (Shiki highlighting) passed straight through to
+   * the markdown processor. Memo cards never set it.
+   */
+  rehypePlugins?: import("unified").Pluggable[];
 } & TaskInteraction) {
   const { t } = useI18n();
   // Transcript bodies rewrite clock markers into `#flaremo-t=` links before
   // parsing; prose without markers passes through untouched.
   const body = onTimestampClick ? toTimestampHrefMarkdown(content) : content;
+  // Articles pass rehype plugins and are typeset as documents. A note is a
+  // record, so its blank lines, indentation and lone `#` survive Markdown.
+  const source = rehypePlugins ? body : protectLiteralLayout(body);
   const slug = withHeadingIds ? createSlugger() : undefined;
   const interactiveTasks = Boolean(onToggleTask || onConvertTask);
 
@@ -165,6 +185,28 @@ export const MemoContent = memo(function MemoContent({
       <Markdown
         components={{
           a({ href, children, node: _node, ...props }) {
+            const mention = mentionFromHref(href);
+            if (mention !== null) {
+              return <span className="memo-mention">{children}</span>;
+            }
+            const tag = tagFromHref(href);
+            if (tag !== null) {
+              return onTagClick ? (
+                <button
+                  className="memo-tag"
+                  type="button"
+                  onClick={(event) => {
+                    // The card body is not a link; keep the click local.
+                    event.stopPropagation();
+                    onTagClick(tag);
+                  }}
+                >
+                  {children}
+                </button>
+              ) : (
+                <span className="memo-tag">{children}</span>
+              );
+            }
             const seconds = isTimestampHref(href)
               ? parseTimestampHref(href ?? "")
               : null;
@@ -181,6 +223,17 @@ export const MemoContent = memo(function MemoContent({
                 >
                   {children}
                 </button>
+              );
+            }
+
+            if (href?.startsWith("/memo/")) {
+              return (
+                <Link
+                  className="font-medium text-foreground underline decoration-brand-500/50 underline-offset-2 transition-colors hover:text-brand-600 hover:decoration-brand-500"
+                  to={href}
+                >
+                  {children}
+                </Link>
               );
             }
 
@@ -293,10 +346,21 @@ export const MemoContent = memo(function MemoContent({
             );
           },
         }}
-        remarkPlugins={[remarkGfm]}
+        rehypePlugins={rehypePlugins}
+        remarkPlugins={
+          rehypePlugins
+            ? [remarkGfm, remarkBreaks, remarkTags]
+            : [
+                remarkGfm,
+                remarkLiteralBreaks,
+                remarkBreaks,
+                remarkLiteralHashes,
+                remarkTags,
+              ]
+        }
         skipHtml
       >
-        {body}
+        {source}
       </Markdown>
     </div>
   );

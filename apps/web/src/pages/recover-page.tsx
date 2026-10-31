@@ -2,12 +2,15 @@ import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { recoverOwner } from "@/api";
 import { AuthPageFrame } from "@/components/auth-page-frame";
+import {
+  MIN_PASSWORD_LENGTH,
+  NewPasswordFields,
+} from "@/components/new-password-fields";
+import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useI18n } from "@/i18n";
 import { errorMessage } from "@/lib/error";
-
-const MIN_PASSWORD_LENGTH = 8;
 
 export function RecoverPage() {
   const { t } = useI18n();
@@ -47,9 +50,9 @@ export function RecoverPage() {
   if (done) {
     return (
       <AuthPageFrame title={t("recover.title")}>
-        <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-200">
+        <Alert role="status" variant="success">
           {t("recover.success")}
-        </p>
+        </Alert>
         <Button
           className="mt-4 w-full"
           variant="brand"
@@ -88,43 +91,15 @@ export function RecoverPage() {
             onChange={(event) => setRecoverySecret(event.target.value)}
           />
         </label>
-        <label
-          className="flex flex-col gap-1.5 text-sm font-medium"
-          htmlFor="recover-new-password"
-        >
-          {t("auth.newPassword")}
-          <Input
-            autoComplete="new-password"
-            disabled={isSubmitting}
-            id="recover-new-password"
-            minLength={MIN_PASSWORD_LENGTH}
-            required
-            type="password"
-            value={newPassword}
-            onChange={(event) => setNewPassword(event.target.value)}
-          />
-        </label>
-        <label
-          className="flex flex-col gap-1.5 text-sm font-medium"
-          htmlFor="recover-confirmation"
-        >
-          {t("auth.confirmPassword")}
-          <Input
-            autoComplete="new-password"
-            disabled={isSubmitting}
-            id="recover-confirmation"
-            minLength={MIN_PASSWORD_LENGTH}
-            required
-            type="password"
-            value={confirmation}
-            onChange={(event) => setConfirmation(event.target.value)}
-          />
-        </label>
-        {formError && (
-          <p className="rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive">
-            {formError}
-          </p>
-        )}
+        <NewPasswordFields
+          confirmation={confirmation}
+          disabled={isSubmitting}
+          idPrefix="recover"
+          newPassword={newPassword}
+          onConfirmationChange={setConfirmation}
+          onNewPasswordChange={setNewPassword}
+        />
+        {formError && <Alert variant="destructive">{formError}</Alert>}
         <Button disabled={isSubmitting} type="submit" variant="brand">
           {isSubmitting ? t("recover.submitting") : t("recover.submit")}
         </Button>

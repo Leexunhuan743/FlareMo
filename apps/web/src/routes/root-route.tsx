@@ -1,11 +1,22 @@
 import type { QueryClient } from "@tanstack/react-query";
 import {
   createRootRouteWithContext,
+  Link,
   Outlet,
   useRouter,
 } from "@tanstack/react-router";
+import { CircleAlertIcon, CompassIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { useI18n } from "@/i18n";
+import { TIMELINE_SEARCH } from "@/lib/timeline-search";
 
 // TanStack Router's ErrorComponentProps carries `error: unknown`; narrow it
 // defensively instead of assuming an Error instance.
@@ -35,22 +46,68 @@ function RouteErrorPage({ error }: { error: unknown }) {
     }
     await router.invalidate();
   };
+  // Built from the same component family as the inline QueryErrorState rather
+  // than hand-rolled markup: both render `list.errorTitle`, and two hand-rolled
+  // versions had already drifted apart (18px/600 here vs 14px/500 inline), so
+  // the shared parts are the fix — the surfaces cannot disagree again.
   return (
-    <main className="mx-auto flex min-h-svh w-full max-w-xl flex-col items-center justify-center gap-4 px-5 text-center">
-      <div>
-        <h1 className="text-lg font-semibold">{t("list.errorTitle")}</h1>
-        <p className="mt-1 text-sm text-muted-foreground">{message}</p>
-      </div>
-      <Button onClick={() => void retry()}>{t("common.retry")}</Button>
-    </main>
+    <Empty className="min-h-svh text-muted-foreground">
+      <EmptyHeader>
+        <EmptyMedia
+          className="bg-destructive/10 text-destructive"
+          variant="icon"
+        >
+          <CircleAlertIcon />
+        </EmptyMedia>
+        <EmptyTitle>{t("list.errorTitle")}</EmptyTitle>
+        {/* The bound message is a technical detail here (it is what a crash or
+            a stale chunk id reports), so it keeps the description slot. */}
+        <EmptyDescription className="break-words">{message}</EmptyDescription>
+      </EmptyHeader>
+      <EmptyContent>
+        <Button variant="outline" onClick={() => void retry()}>
+          {t("common.retry")}
+        </Button>
+      </EmptyContent>
+    </Empty>
   );
 }
 
 // Typed context makes every route loader's `context.queryClient` known; the
 // real QueryClient is injected through RouterProvider's context prop.
+/**
+ * Unknown paths used to render the string "Not Found" against a blank page —
+ * the worker returns the app shell with a 404 status, and nothing in the
+ * router claimed the route, so the shell mounted with no content at all. This
+ * keeps the app's own empty-state vocabulary and gives the visitor a way back.
+ */
+function RouteNotFoundPage() {
+  const { t } = useI18n();
+  return (
+    <Empty className="min-h-svh text-muted-foreground">
+      <EmptyHeader>
+        <EmptyMedia className="bg-muted text-muted-foreground" variant="icon">
+          <CompassIcon />
+        </EmptyMedia>
+        <EmptyTitle>{t("notFound.title")}</EmptyTitle>
+        <EmptyDescription>{t("notFound.description")}</EmptyDescription>
+      </EmptyHeader>
+      <EmptyContent>
+        <Button
+          render={<Link search={TIMELINE_SEARCH} to="/" />}
+          variant="outline"
+        >
+          {t("notFound.home")}
+        </Button>
+      </EmptyContent>
+    </Empty>
+  );
+}
+
 export const rootRoute = createRootRouteWithContext<{
   queryClient: QueryClient;
 }>()({
   component: () => <Outlet />,
   errorComponent: RouteErrorPage,
+  notFoundComponent: RouteNotFoundPage,
 });

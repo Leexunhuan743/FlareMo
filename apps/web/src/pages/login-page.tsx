@@ -1,13 +1,50 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, Navigate, useSearch } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { getBootstrapStatus, getRegistrationStatus } from "@/api";
+import { getAuthProviders } from "@/api/integrations";
 import { authClient } from "@/auth-client";
 import { AuthPageFrame } from "@/components/auth-page-frame";
+import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
+import { Spinner } from "@/components/ui/spinner";
 import { useI18n } from "@/i18n";
 import { errorMessage } from "@/lib/error";
+
+/**
+ * Better Auth answers a wrong account or password with an English message
+ * (`INVALID_EMAIL_OR_PASSWORD`, `INVALID_USERNAME_OR_PASSWORD`, 401). Show the
+ * localized sentence instead; other failures keep their own text.
+ */
+function loginErrorMessage(error: unknown, fallback: string) {
+  if (error && typeof error === "object") {
+    const code = "code" in error ? error.code : undefined;
+    const status = "status" in error ? error.status : undefined;
+    if (
+      status === 401 ||
+      (typeof code === "string" && /^INVALID_\w*PASSWORD$/.test(code))
+    ) {
+      return fallback;
+    }
+  }
+  return errorMessage(error, fallback);
+}
+
+// How long the login page waits for the client session to confirm a
+// successful sign-in before falling back to a full document navigation. The
+// sign-in response has already stored the session cookie, so a reload reads
+// it directly; without this fallback a stalled confirmation left the user on
+// the form with no feedback (2026-10-10 support report: three successful
+// sign-ins, browser never left the login page).
+const POST_SIGN_IN_CONFIRMATION_TIMEOUT_MS = 5_000;
+// Marker for the recovery reload above: if the tab comes back to the login
+// page still without a session, the browser did not keep the cookie, and
+// reloading again would only loop. The timestamp keeps a stale marker from a
+// much later visit from raising a false alarm.
+const POST_SIGN_IN_RECOVERY_KEY = "flaremo.post-signin-recovery";
+const POST_SIGN_IN_RECOVERY_TTL_MS = 120_000;
 
 export function LoginPage() {
   const { t } = useI18n();
@@ -26,10 +63,83 @@ export function LoginPage() {
     queryFn: getRegistrationStatus,
     retry: false,
   });
-  const [email, setEmail] = useState("");
+  const providersQuery = useQuery({
+    queryKey: ["auth-providers"],
+    queryFn: getAuthProviders,
+    staleTime: 60_000,
+  });
+  const [account, setAccount] = useState("");
   const [password, setPassword] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [socialPending, setSocialPending] = useState<string | null>(null);
+  const [postSignIn, setPostSignIn] = useState(false);
+
+  // After a successful sign-in the server has already set the session
+  // cookie; the render branch below navigates as soon as the client session
+  // lands. That confirmation is a second round trip — when it stalls,
+  // nothing else moves the user off the form, so this watchdog guarantees an
+  // exit: with the cookie in place a full navigation reads it directly.
+  useEffect(() => {
+    if (!postSignIn) return;
+    const target = redirect && !redirect.startsWith("/login") ? redirect : "/";
+    const timer = window.setTimeout(() => {
+      try {
+        sessionStorage.setItem(POST_SIGN_IN_RECOVERY_KEY, String(Date.now()));
+      } catch {
+        // Storage unavailable; the reload below is still the right recovery.
+      }
+      window.location.replace(target);
+    }, POST_SIGN_IN_CONFIRMATION_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [postSignIn, redirect]);
+
+  // Returning from the recovery reload still without a session means the
+  // browser refused the session cookie (blocked by privacy settings); a
+  // further reload cannot help, so surface it instead of looping silently.
+  useEffect(() => {
+    if (session.isPending) return;
+    let marker: string | null = null;
+    try {
+      marker = sessionStorage.getItem(POST_SIGN_IN_RECOVERY_KEY);
+      if (marker) sessionStorage.removeItem(POST_SIGN_IN_RECOVERY_KEY);
+    } catch {
+      return;
+    }
+    if (!marker || session.data?.user) return;
+    if (Date.now() - Number(marker) > POST_SIGN_IN_RECOVERY_TTL_MS) return;
+    setFormError(t("auth.sessionNotStored"));
+  }, [session.data, session.isPending, t]);
+
+  const socialProviders = [
+    ...(providersQuery.data?.google ? ["google"] : []),
+    ...(providersQuery.data?.github ? ["github"] : []),
+  ];
+
+  const handleSocialSignIn = async (provider: "google" | "github") => {
+    setFormError(null);
+    setSocialPending(provider);
+    try {
+      const result = await authClient.signIn.social({
+        provider,
+        callbackURL:
+          redirect && !redirect.startsWith("/login") ? redirect : "/",
+      });
+      if (result.error) {
+        throw result.error;
+      }
+      // The server returns the provider's authorization URL; complete the
+      // round trip in this tab.
+      if (result.data?.url) {
+        window.location.href = result.data.url;
+        return;
+      }
+      setSocialPending(null);
+    } catch (error) {
+      setSocialPending(null);
+      setFormError(loginErrorMessage(error, t("auth.loginFailed")));
+    }
+  };
 
   if (session.data?.user) {
     // Single navigation owner: the session render branch decides where to go,
@@ -65,36 +175,61 @@ export function LoginPage() {
   const handleSubmit = async () => {
     setFormError(null);
     setIsSubmitting(true);
+    const trimmed = account.trim();
+    const isExplicitHandle = trimmed.startsWith("@");
+    const isEmail =
+      !isExplicitHandle && trimmed.includes("@") && trimmed.includes(".");
+
     try {
-      const result = await authClient.signIn.email({
-        password,
-        email: email.trim(),
-      });
-      if (result.error) {
-        throw result.error;
+      if (isEmail) {
+        const result = await authClient.signIn.email({
+          password,
+          email: trimmed,
+        });
+        if (result.error) {
+          throw result.error;
+        }
+      } else {
+        const username = trimmed.replace(/^@/, "");
+        const result = await authClient.signIn.username({
+          password,
+          username,
+        });
+        if (result.error) {
+          throw result.error;
+        }
       }
       setPassword("");
+      // Keep the form disabled: the session render branch (or the watchdog
+      // above) owns navigation from here.
+      setPostSignIn(true);
     } catch (error) {
-      setFormError(errorMessage(error, t("auth.loginFailed")));
-    } finally {
+      setFormError(loginErrorMessage(error, t("auth.loginFailed")));
       setIsSubmitting(false);
     }
   };
 
+  let submitLabel = t("auth.signIn");
+  if (isSubmitting) {
+    submitLabel = postSignIn
+      ? t("auth.confirmingSession")
+      : t("auth.signingIn");
+  }
+
   return (
     <AuthPageFrame title={t("auth.loginTitle")}>
       {bootstrapQuery.isError && (
-        <p className="mb-4 rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive">
+        <Alert className="mb-4" variant="destructive">
           {t("auth.statusUnavailable")}
-        </p>
+        </Alert>
       )}
       {bootstrapQuery.data?.initialized === false &&
         !bootstrapQuery.data.setup_available && (
-          <p className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">
+          <Alert className="mb-4" role="status" variant="warning">
             {bootstrapQuery.data.state === "recovery_required"
               ? t("auth.recoveryRequired")
               : t("auth.setupUnavailable")}
-          </p>
+          </Alert>
         )}
       <form
         className="flex flex-col gap-4"
@@ -105,20 +240,21 @@ export function LoginPage() {
       >
         <label
           className="flex flex-col gap-1.5 text-sm font-medium"
-          htmlFor="login-email"
+          htmlFor="login-account"
         >
-          {t("auth.email")}
+          {t("auth.emailOrUsername")}
           <Input
             autoCapitalize="none"
-            autoComplete="email"
+            autoComplete="username"
             disabled={isSubmitting}
-            id="login-email"
+            id="login-account"
             maxLength={320}
-            name="email"
+            name="account"
+            placeholder={t("auth.emailOrUsernamePlaceholder")}
             required
-            type="email"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
+            type="text"
+            value={account}
+            onChange={(event) => setAccount(event.target.value)}
           />
         </label>
         <label
@@ -126,30 +262,50 @@ export function LoginPage() {
           htmlFor="login-password"
         >
           {t("auth.password")}
-          <Input
+          <PasswordInput
             autoComplete="current-password"
             disabled={isSubmitting}
             id="login-password"
             name="password"
             required
-            type="password"
             value={password}
             onChange={(event) => setPassword(event.target.value)}
           />
         </label>
-        {formError && (
-          <p className="rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive">
-            {formError}
-          </p>
-        )}
+        {formError && <Alert variant="destructive">{formError}</Alert>}
         <Button
           className="mt-1"
           disabled={isSubmitting}
           type="submit"
           variant="brand"
         >
-          {isSubmitting ? t("auth.signingIn") : t("auth.signIn")}
+          {submitLabel}
         </Button>
+        {socialProviders.length > 0 && (
+          <div className="flex flex-col gap-2 border-t pt-3">
+            <p className="text-center text-muted-foreground text-xs">
+              {t("auth.socialSignInHint")}
+            </p>
+            {socialProviders.map((provider) => (
+              <Button
+                disabled={socialPending !== null || isSubmitting}
+                key={provider}
+                type="button"
+                variant="outline"
+                onClick={() =>
+                  void handleSocialSignIn(provider as "google" | "github")
+                }
+              >
+                {socialPending === provider && (
+                  <Spinner data-icon="inline-start" />
+                )}
+                {provider === "google"
+                  ? t("auth.continueWithGoogle")
+                  : t("auth.continueWithGithub")}
+              </Button>
+            ))}
+          </div>
+        )}
         <p className="text-center text-sm">
           <Link
             className="text-muted-foreground underline-offset-4 hover:underline"
@@ -168,10 +324,13 @@ export function LoginPage() {
             </Link>
           </p>
         )}
-        {/* Always-present trailing slot: the register link appears here once
-            the public status lands, and the row keeps its height so the
-            buttons above never shift. */}
-        <div aria-hidden="true" className="min-h-6" />
+        {/* Holds the register link's row while the public status loads, so
+            the buttons above never shift when it lands. Once registration
+            is known to be closed the slot goes, instead of leaving an empty
+            band at the foot of the card. */}
+        {registrationQuery.isPending && (
+          <div aria-hidden="true" className="min-h-5" />
+        )}
       </form>
     </AuthPageFrame>
   );

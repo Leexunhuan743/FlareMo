@@ -1,8 +1,11 @@
-import { applyFlaremoMigrations, createDb } from "@flaremo/db";
+import { applyFlaremoMigrations, createDb, memos } from "@flaremo/db";
+import { eq } from "drizzle-orm";
 import { Miniflare } from "miniflare";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { recalibrateUserHourlyCounts } from "./memo-hourly-counts";
 import {
   createMemo,
+  getMemoById,
   getMemoStats,
   listMemosForViewer,
   updateMemo,
@@ -160,26 +163,26 @@ describe("listMemosForViewer space scoping", () => {
 });
 
 describe("space-scoped stats and tags", () => {
-  let ownPrivate: string;
-  let ownTeam: string;
-  let otherTeam: string;
+  let _ownPrivate: string;
+  let _ownTeam: string;
+  let _otherTeam: string;
 
   beforeEach(async () => {
-    ownPrivate = (
+    _ownPrivate = (
       await createMemo(db, member, {
         content: "personal #space-tags",
         visibility: "private",
         source: "web",
       })
     ).id;
-    ownTeam = (
+    _ownTeam = (
       await createMemo(db, member, {
         content: "own team #space-tags",
         visibility: "protected",
         source: "web",
       })
     ).id;
-    otherTeam = (
+    _otherTeam = (
       await createMemo(db, owner, {
         content: "owner team #space-tags",
         visibility: "protected",
@@ -240,5 +243,181 @@ describe("space-scoped stats and tags", () => {
     expect(tagOf(undefined)).resolves.toEqual([
       { name: "space-tags", count: 2 },
     ]);
+  });
+});
+
+describe("updateMemo tag re-extraction", () => {
+  it("re-derives tags from the new content when the patch carries no payload", async () => {
+    const memo = await createMemo(db, member, {
+      content: "first draft",
+      visibility: "private",
+      source: "web",
+    });
+    // No tags at creation time: the stored payload has tags: [].
+    expect(memo.payload.tags).toEqual([]);
+
+    // The web editor PATCHes only content+visibility; the added #随笔 must
+    // still be extracted (issue #139: tags used to freeze at creation time).
+    await updateMemo(db, member, memo.id, {
+      content: "first draft #随笔",
+      visibility: "private",
+    });
+    const edited = await getMemoById(db, member, memo.id);
+    expect(edited.payload.tags).toEqual(["随笔"]);
+    const tree = await listTagHierarchy(db, member, {});
+    expect(
+      tree.map((node) => ({ name: node.name, count: node.count })),
+    ).toEqual([{ name: "随笔", count: 1 }]);
+
+    // Removing the token in a later edit drops the tag again.
+    await updateMemo(db, member, memo.id, {
+      content: "second draft",
+      visibility: "private",
+    });
+    const reEdited = await getMemoById(db, member, memo.id);
+    expect(reEdited.payload.tags).toEqual([]);
+    expect(await listTagHierarchy(db, member, {})).toEqual([]);
+  });
+
+  it("honors payload.tags when the patch carries an explicit payload", async () => {
+    const memo = await createMemo(db, member, {
+      content: "first draft",
+      visibility: "private",
+      source: "web",
+    });
+    // Import overwrite / revision restore semantics: the caller manages the
+    // tag list itself, so a content edit plus explicit payload keeps tags the
+    // content does not spell out.
+    await updateMemo(db, member, memo.id, {
+      content: "first draft edited",
+      visibility: "private",
+      payload: { tags: ["imported-tag"] },
+    });
+    const edited = await getMemoById(db, member, memo.id);
+    expect(edited.payload.tags).toEqual(["imported-tag"]);
+    const tree = await listTagHierarchy(db, member, {});
+    expect(tree.map((node) => node.name)).toEqual(["imported-tag"]);
+  });
+});
+
+describe("getMemoStats until anchor", () => {
+  it("anchors the activity window at the requested date for the counter path", async () => {
+    // A backdated memo (imported history) lands years outside the trailing
+    // window; the counter is rebuilt from `memos` so the stats read sees it.
+    const memo = await createMemo(db, member, {
+      content: "imported 2019 note",
+      visibility: "private",
+      source: "web",
+    });
+    await db
+      .update(memos)
+      .set({
+        createdAt: "2019-09-20T10:00:00.000Z",
+        updatedAt: "2019-09-20T10:00:00.000Z",
+      })
+      .where(eq(memos.id, memo.id));
+    await recalibrateUserHourlyCounts(db, member.id, new Date().toISOString());
+
+    const anchored = await getMemoStats(db, member, {
+      time_zone: "UTC",
+      days: 366,
+      until: "2019-12-31",
+    });
+    expect(anchored.activity.at(-1)?.date).toBe("2019-12-31");
+    expect(anchored.activity.find((d) => d.date === "2019-09-20")?.count).toBe(
+      1,
+    );
+
+    // Default (no anchor) still ends today, and the 2019 note stays outside
+    // the trailing window.
+    const trailing = await getMemoStats(db, member, {
+      time_zone: "UTC",
+      days: 366,
+    });
+    expect(trailing.activity.at(-1)?.date).toBe(
+      new Date().toISOString().slice(0, 10),
+    );
+    expect(
+      trailing.activity.find((d) => d.date === "2019-09-20"),
+    ).toBeUndefined();
+  });
+
+  it("anchors the live space-partitioned path the same way", async () => {
+    const memo = await createMemo(db, member, {
+      content: "imported team note",
+      visibility: "protected",
+      source: "web",
+    });
+    await db
+      .update(memos)
+      .set({
+        createdAt: "2019-09-20T10:00:00.000Z",
+        updatedAt: "2019-09-20T10:00:00.000Z",
+      })
+      .where(eq(memos.id, memo.id));
+
+    const anchored = await getMemoStats(
+      db,
+      member,
+      { time_zone: "UTC", days: 366, until: "2019-12-31" },
+      { space: "team" },
+    );
+    expect(anchored.activity.at(-1)?.date).toBe("2019-12-31");
+    expect(anchored.activity.find((d) => d.date === "2019-09-20")?.count).toBe(
+      1,
+    );
+  });
+});
+
+describe("listTagHierarchy aggregation", () => {
+  it("counts each memo once per ancestor when it carries both parent and child tags", async () => {
+    // The ancestor count is a distinct-memo count, not a sum of leaf counts:
+    // a memo tagged both 工作 and 工作/项目a must contribute 1 to 工作, not 2.
+    await createMemo(db, member, {
+      content: "both levels #工作 #工作/项目a",
+      visibility: "private",
+      source: "web",
+    });
+    await createMemo(db, member, {
+      content: "child only #工作/项目a",
+      visibility: "private",
+      source: "web",
+    });
+    await createMemo(db, member, {
+      content: "grandchild #工作/项目a/子",
+      visibility: "private",
+      source: "web",
+    });
+    await createMemo(db, member, {
+      content: "plain tag #生活",
+      visibility: "private",
+      source: "web",
+    });
+
+    const tree = await listTagHierarchy(db, member, {});
+    const byName = new Map(tree.map((node) => [node.name, node]));
+    expect(byName.get("生活")?.count).toBe(1);
+
+    const work = byName.get("工作");
+    expect(work?.count).toBe(3);
+    const project = work?.children.find((node) => node.name === "工作/项目a");
+    expect(project?.count).toBe(3);
+    expect(project?.children[0]?.name).toBe("工作/项目a/子");
+    expect(project?.children[0]?.count).toBe(1);
+  });
+
+  it("keeps flat tags at their own distinct-memo count", async () => {
+    await createMemo(db, member, {
+      content: "one #平铺",
+      visibility: "private",
+      source: "web",
+    });
+    await createMemo(db, member, {
+      content: "two #平铺",
+      visibility: "private",
+      source: "web",
+    });
+    const tree = await listTagHierarchy(db, member, {});
+    expect(tree.find((node) => node.name === "平铺")?.count).toBe(2);
   });
 });

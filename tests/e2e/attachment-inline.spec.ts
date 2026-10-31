@@ -90,13 +90,13 @@ test("renders inline body images and keeps the gallery for the rest", async ({
     .toBeGreaterThan(0);
 
   // Dedup: the referenced attachment leaves the gallery, the loose one stays.
-  // A gallery image row carries two same-href anchors (image wrapper + file row).
+  // Gallery images are lightbox buttons named after the file.
   await expect(
-    page.locator(`a[href*="/api/v1/attachments/${loose.id}/blob"]`).first(),
+    page.getByRole("button", { name: loose.filename }),
   ).toBeVisible();
-  await expect(
-    page.locator(`a[href*="/api/v1/attachments/${inline.id}/blob"]`),
-  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: inline.filename })).toHaveCount(
+    0,
+  );
 });
 
 test("degrades a dead body image to a placeholder", async ({
@@ -215,7 +215,9 @@ test("pasting an image into the composer inserts a reference and binds it on sen
     timeout: 15_000,
   });
   await composer.pressSequentially(` Marker ${marker}`);
-  await page.getByRole("button", { name: /^(发送|Send)/ }).click();
+  // Anchored match: the composer row also has a "Send target" dropdown
+  // trigger next to the submit button (spaces feature).
+  await page.getByRole("button", { name: /^(发送|Send)$/i }).click();
   await expect(composer).toHaveText("", { timeout: 15_000 });
 
   const listResponse = await request.get("/api/app/memos?page_size=50");

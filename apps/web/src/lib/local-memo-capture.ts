@@ -1,4 +1,5 @@
 import type { MemoVisibility } from "@flaremo/contracts";
+import type { MemoSchedule } from "@/lib/memo-schedule";
 
 /**
  * The single composer uses this id. Consumers that expose multiple compose
@@ -13,6 +14,11 @@ const DRAFT_STORE = "drafts";
 const SUBMISSION_QUEUE_STORE = "submission-queue";
 
 export type MemoCaptureInput = {
+  /**
+   * Title when drafting an article in the fullscreen composer. Empty or
+   * undefined for regular memos.
+   */
+  title?: string;
   content: string;
   visibility: MemoVisibility;
   tags: string[];
@@ -28,6 +34,12 @@ export type MemoCaptureInput = {
    * retried so a future idempotent create endpoint can recognize the replay.
    */
   clientId?: string;
+  /**
+   * "Remind me on this day": on send, the memo's open to-dos are filed as
+   * tasks due that day. Persisted with drafts and queued submissions so an
+   * offline send still schedules once it syncs.
+   */
+  schedule?: MemoSchedule;
 };
 
 export type MemoDraft = MemoCaptureInput & {
@@ -155,6 +167,7 @@ export function createMemoCaptureInput(
   input: MemoCaptureInput,
 ): MemoCaptureInput {
   return {
+    ...(input.title !== undefined ? { title: input.title } : {}),
     content: input.content,
     visibility: input.visibility,
     tags: normalizeTags(input.tags),
@@ -163,11 +176,16 @@ export function createMemoCaptureInput(
       ? { preuploadedAttachmentNames: [...input.preuploadedAttachmentNames] }
       : {}),
     clientId: input.clientId ?? createMemoCaptureClientId(),
+    ...(input.schedule ? { schedule: { ...input.schedule } } : {}),
   };
 }
 
 export function isMemoCaptureEmpty(input: MemoCaptureInput) {
-  return input.content.trim().length === 0 && input.files.length === 0;
+  return (
+    input.content.trim().length === 0 &&
+    input.files.length === 0 &&
+    (!input.title || input.title.trim().length === 0)
+  );
 }
 
 /** Returns false instead of throwing when IndexedDB is disabled or unavailable. */
@@ -310,6 +328,7 @@ function normalizeTags(tags: string[]) {
 function toPersistedCapture(input: MemoCaptureInput): PersistedMemoCapture {
   const capture = createMemoCaptureInput(input);
   return {
+    ...(capture.title !== undefined ? { title: capture.title } : {}),
     content: capture.content,
     visibility: capture.visibility,
     tags: capture.tags,
@@ -319,6 +338,7 @@ function toPersistedCapture(input: MemoCaptureInput): PersistedMemoCapture {
         }
       : {}),
     clientId: capture.clientId ?? createMemoCaptureClientId(),
+    ...(capture.schedule ? { schedule: capture.schedule } : {}),
     attachments: capture.files.map((file) => ({
       filename: file.name,
       contentType: file.type,
@@ -356,6 +376,7 @@ function fromQueuedSubmissionRecord(
 
 function fromPersistedCapture(record: PersistedMemoCapture): MemoCaptureInput {
   return {
+    ...(record.title !== undefined ? { title: record.title } : {}),
     content: record.content,
     visibility: record.visibility,
     tags: [...record.tags],
@@ -364,6 +385,7 @@ function fromPersistedCapture(record: PersistedMemoCapture): MemoCaptureInput {
       ? { preuploadedAttachmentNames: [...record.preuploadedAttachmentNames] }
       : {}),
     clientId: record.clientId,
+    ...(record.schedule ? { schedule: { ...record.schedule } } : {}),
   };
 }
 

@@ -11,6 +11,7 @@ import {
   dataTasks,
   embeddingTasks,
   memoRelations,
+  memoReviewMarks,
   memoRevisions,
   memoryItems,
   memoryRelations,
@@ -33,7 +34,18 @@ import {
   usageCounters,
   users,
 } from "@flaremo/db";
-import { and, asc, count, eq, inArray, isNotNull, ne, or } from "drizzle-orm";
+import {
+  and,
+  asc,
+  count,
+  eq,
+  inArray,
+  isNotNull,
+  ne,
+  or,
+  sql,
+} from "drizzle-orm";
+import { chunkForD1, d1IdsPerStatement } from "./d1-limits";
 import {
   ConflictError,
   ForbiddenError,
@@ -41,6 +53,7 @@ import {
   ValidationError,
 } from "./errors";
 import type { PlanLimits } from "./limits";
+import { recalibrateUserHourlyCounts } from "./memo-hourly-counts";
 import { assertMemberQuota } from "./quotas";
 import type { TeamRole } from "./team-permissions";
 
@@ -162,7 +175,7 @@ export async function ensureSingleUser(
 
   const row = {
     id,
-    email: config.email,
+    email: config.email.trim().toLowerCase(),
     name: config.name,
     avatarUrl: null,
     status: "active" as const,
@@ -186,6 +199,15 @@ export async function getFlaremoUserById(
  * accounts. IDs are `users/<uuid>`: `memosSubjectForFlaremoUserId` already
  * hashes non-numeric ids deterministically and the link table keeps the
  * auth identity separate, so no counter table is required.
+ *
+ * The address is stored lowercased and an occupied address fails as a typed
+ * conflict. Both matter because the identity is created before this row:
+ * Better Auth answers a duplicate with a synthetic, unpersisted user when
+ * `autoSignIn` is off, so this insert — not the sign-up call — is where a
+ * collision surfaces. Left to the unique index it would raise a bare driver
+ * error with no status (a 500 on every surface), and a differently-cased
+ * duplicate would pass the byte-wise index only to fail on the link insert
+ * while leaving the orphaned `users` row behind.
  */
 export async function createFlaremoMember(
   db: FlareMoDb,
@@ -193,9 +215,13 @@ export async function createFlaremoMember(
 ): Promise<UserRow> {
   const id = `users/${crypto.randomUUID()}`;
   const now = new Date().toISOString();
+  const email = config.email.trim().toLowerCase();
+  if (await isFlaremoUserEmailTaken(db, email)) {
+    throw new ConflictError("That email is already in use.");
+  }
   const row = {
     id,
-    email: config.email,
+    email,
     name: config.name,
     avatarUrl: null,
     status: "active" as const,
@@ -283,18 +309,64 @@ export async function updateTeamMemberRole(
   if (!member) {
     throw new NotFoundError("Active member not found");
   }
-  if (member.role !== "member" && role === "member") {
+  // Demoting an administrator requires another active admin; promoting a
+  // reader to member does not (a reader seat is not an administrator).
+  if (member.role === "admin" && role === "member") {
     await assertAnotherActiveTeamAdmin(db, authUserId);
   }
+  // Leaving the reader seat invalidates its expiry so stale dates cannot
+  // resurface if the user becomes a reader again later.
   await db
     .update(authMembers)
-    .set({ role })
+    .set({ role, expiresAt: role === "reader" ? member.expiresAt : null })
     .where(
       and(
         eq(authMembers.id, member.id),
         eq(authMembers.organizationId, team.id),
       ),
     );
+}
+
+/**
+ * Grant the read-only reader seat (community membership) to a user, storing
+ * the absolute expiry (null = no expiry). Existing rows of any role become
+ * reader rows; non-members get a reader membership in the default team. The
+ * caller (admin API) computes renewal dates, so domain storage stays simple.
+ */
+export async function grantTeamReader(
+  db: FlareMoDb,
+  input: { authUserId: string; expiresAt: Date | null },
+): Promise<void> {
+  const team = await ensureDefaultTeam(db);
+  await db
+    .insert(authMembers)
+    .values({
+      id: `members/${crypto.randomUUID()}`,
+      organizationId: team.id,
+      userId: input.authUserId,
+      role: "reader",
+      expiresAt: input.expiresAt,
+      createdAt: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: [authMembers.organizationId, authMembers.userId],
+      set: { role: "reader", expiresAt: input.expiresAt },
+    });
+}
+
+/**
+ * Revoke the reader seat by removing the membership row: the user drops out
+ * of the team entirely. Readers never authored team memos (publishing is
+ * denied at resolveMemoTeamId), so no owner-claim follow-up is required —
+ * unless they previously demoted from a full member, in which case their
+ * existing team memos stay published and visible, exactly like a member
+ * leaving without account removal.
+ */
+export async function revokeTeamReader(
+  db: FlareMoDb,
+  authUserId: string,
+): Promise<void> {
+  await removeTeamMember(db, authUserId);
 }
 
 /**
@@ -532,6 +604,7 @@ export async function finalizeFlaremoMemberRemoval(
         ),
       ),
     db.delete(shortcuts).where(eq(shortcuts.userId, userId)),
+    db.delete(memoReviewMarks).where(eq(memoReviewMarks.userId, userId)),
     db
       .delete(memoryResourceLinks)
       .where(eq(memoryResourceLinks.userId, userId)),
@@ -541,34 +614,42 @@ export async function finalizeFlaremoMemberRemoval(
   ]);
 
   if (privateMemoIds.length > 0) {
-    await db.batch([
-      db
-        .delete(embeddingTasks)
-        .where(
-          and(
-            eq(embeddingTasks.userId, userId),
-            inArray(embeddingTasks.resourceId, privateMemoIds),
+    // Every statement here binds the member's whole private-memo id list, and
+    // D1 stops at 100 parameters. Deleting an active member used to fail
+    // outright past that count — the whole removal is one transaction body, so
+    // there was no partial state to recover from either. Chunks are safe to
+    // run sequentially because each one only ever narrows the same row set.
+    for (const idChunk of chunkForD1(privateMemoIds, d1IdsPerStatement(4))) {
+      await db.batch([
+        db
+          .delete(embeddingTasks)
+          .where(
+            and(
+              eq(embeddingTasks.userId, userId),
+              inArray(embeddingTasks.resourceId, idChunk),
+            ),
           ),
-        ),
-      db
-        .delete(memoRelations)
-        .where(
-          or(
-            inArray(memoRelations.memoId, privateMemoIds),
-            inArray(memoRelations.relatedMemoId, privateMemoIds),
+        db
+          .delete(memoRelations)
+          .where(
+            or(
+              inArray(memoRelations.memoId, idChunk),
+              inArray(memoRelations.relatedMemoId, idChunk),
+            ),
           ),
-        ),
-      db
-        .delete(memoRevisions)
-        .where(inArray(memoRevisions.memoId, privateMemoIds)),
-      db.delete(memoTags).where(inArray(memoTags.memoId, privateMemoIds)),
-      db.delete(memos).where(inArray(memos.id, privateMemoIds)),
-    ]);
+        db.delete(memoRevisions).where(inArray(memoRevisions.memoId, idChunk)),
+        db.delete(memoTags).where(inArray(memoTags.memoId, idChunk)),
+        db.delete(memos).where(inArray(memos.id, idChunk)),
+      ]);
+    }
   }
   if (privateAttachmentIds.length > 0) {
-    await db
-      .delete(attachments)
-      .where(inArray(attachments.id, privateAttachmentIds));
+    for (const idChunk of chunkForD1(
+      privateAttachmentIds,
+      d1IdsPerStatement(),
+    )) {
+      await db.delete(attachments).where(inArray(attachments.id, idChunk));
+    }
   }
   await db
     .delete(embeddingTasks)
@@ -582,22 +663,57 @@ export async function finalizeFlaremoMemberRemoval(
   // Adopt the removed member's team/public memos. The client id is dropped
   // with the old owner so the owner's `(user_id, client_id)` idempotency
   // index can never conflict.
-  await db
-    .update(memos)
-    .set({ userId: "users/owner", clientId: null })
+  //
+  // The ids are read before the update rather than in a subquery inside the
+  // same batch: statements in one batch must not depend on each other's
+  // effects, and this batch reassigns the very rows the tag filter selects on.
+  const adoptedMemoRows = await db
+    .select({ id: memos.id })
+    .from(memos)
     .where(and(eq(memos.userId, userId), isNotNull(memos.teamId)));
+  const adoptedMemoIds = adoptedMemoRows.map((row) => row.id);
+
+  // `memo_tags.user_id` is denormalized from the memo's author, so the
+  // adopted memos' tag rows have to move with them: the fast-path tag query
+  // filters on `memo_tags.user_id` while every other number filters on
+  // `memos.user_id`, and leaving them apart makes the owner see adopted memos
+  // in `counts` but not in `tags`. The `(memo_id, tag)` primary key and the
+  // `memo_tags_user_tag_memo_idx` both start with `user_id`, so the migration
+  // keeps the index usable.
+  if (adoptedMemoIds.length > 0) {
+    for (const idChunk of chunkForD1(adoptedMemoIds, d1IdsPerStatement())) {
+      await db.batch([
+        db
+          .update(memos)
+          .set({ userId: "users/owner", clientId: null })
+          .where(inArray(memos.id, idChunk)),
+        db
+          .update(memoTags)
+          .set({ userId: "users/owner" })
+          .where(inArray(memoTags.memoId, idChunk)),
+      ]);
+    }
+  }
+
+  // Both halves above move memos without touching `memo_hourly_counts`: the
+  // purge deletes rows, the adoption reassigns them. Rebuild the two affected
+  // counters rather than emitting per-memo adjustments — this runs once per
+  // member removal, and the removed member's own rows have to disappear
+  // entirely (the `users` row is only soft-deleted, so the FK cascade that
+  // would normally clear them never fires). Left to the nightly recalibration
+  // this would read as the owner undercounting and the removed member still
+  // counting memos that no longer exist.
+  const now = new Date().toISOString();
+  await recalibrateUserHourlyCounts(db, "users/owner", now);
+  await recalibrateUserHourlyCounts(db, userId, now);
 }
 
 /**
- * Update the FlareMo domain user's email in the business `users` table. The
- * caller is responsible for updating the Better Auth `auth_users` credential
- * and for any prior identity verification; this service only keeps the domain
- * copy in sync and enforces the table's unique-email constraint. The email is
- * normalized to lowercase so the two unique email columns stay comparable.
- */
-/**
- * Whether the business `users` table already holds this (lowercased) email.
- * Used for early conflict feedback on email-change requests; the authoritative
+ * Whether the business `users` table already holds this email, compared
+ * case-insensitively. The unique index compares bytes, so rows written before
+ * addresses were normalized to lowercase still exist; matching on `lower()`
+ * keeps those rows authoritative instead of letting a differently-cased
+ * duplicate slip through to fail later on the link insert. The authoritative
  * unique-constraint enforcement stays inside updateFlaremoUserEmail.
  */
 export async function isFlaremoUserEmailTaken(
@@ -607,11 +723,18 @@ export async function isFlaremoUserEmailTaken(
 ): Promise<boolean> {
   const normalized = email.trim().toLowerCase();
   const taken = await db.query.users.findFirst({
-    where: eq(users.email, normalized),
+    where: sql`lower(${users.email}) = ${normalized}`,
   });
   return Boolean(taken && taken.id !== excludeUserId);
 }
 
+/**
+ * Update the FlareMo domain user's email in the business `users` table. The
+ * caller is responsible for updating the Better Auth `auth_users` credential
+ * and for any prior identity verification; this service only keeps the domain
+ * copy in sync and enforces the table's unique-email constraint. The email is
+ * normalized to lowercase so the two unique email columns stay comparable.
+ */
 export async function updateFlaremoUserEmail(
   db: FlareMoDb,
   user: UserRow,
@@ -621,10 +744,7 @@ export async function updateFlaremoUserEmail(
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     throw new ValidationError("A valid email address is required.");
   }
-  const taken = await db.query.users.findFirst({
-    where: eq(users.email, email),
-  });
-  if (taken && taken.id !== user.id) {
+  if (await isFlaremoUserEmailTaken(db, email, user.id)) {
     throw new ConflictError("That email is already in use.");
   }
   await db
@@ -639,7 +759,11 @@ export async function updateFlaremoUserEmail(
 export async function updateFlaremoUserProfile(
   db: FlareMoDb,
   user: UserRow,
-  input: { name?: string; avatarUrl?: string | null },
+  input: {
+    name?: string;
+    avatarUrl?: string | null;
+    authUserId?: string | null;
+  },
 ) {
   const nextName = input.name?.trim();
   if (nextName === "") throw new Error("Display name cannot be empty");
@@ -651,6 +775,28 @@ export async function updateFlaremoUserProfile(
       updatedAt: new Date().toISOString(),
     })
     .where(eq(users.id, user.id));
+
+  const authUserId =
+    input.authUserId ??
+    (
+      await db.query.authUserLinks.findFirst({
+        where: eq(authUserLinks.flaremoUserId, user.id),
+      })
+    )?.authUserId;
+
+  if (authUserId) {
+    await db
+      .update(authUsers)
+      .set({
+        ...(nextName !== undefined
+          ? { name: nextName, displayUsername: nextName }
+          : {}),
+        ...(input.avatarUrl !== undefined ? { image: input.avatarUrl } : {}),
+        updatedAt: new Date(),
+      })
+      .where(eq(authUsers.id, authUserId));
+  }
+
   return (
     (await db.query.users.findFirst({ where: eq(users.id, user.id) })) ?? user
   );

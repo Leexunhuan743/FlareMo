@@ -1,38 +1,21 @@
-import { useQuery } from "@tanstack/react-query";
-import { Link, useNavigate } from "@tanstack/react-router";
-import { AlertCircleIcon } from "lucide-react";
-import { useMemo } from "react";
-import type { MemoStatsResponse } from "@/api";
-import { listTasks } from "@/api";
-import { FlareMoMiniCalendar } from "@/components/flaremo-calendar";
+import { Link } from "@tanstack/react-router";
+import { type ReactNode, useMemo } from "react";
 import { useI18n } from "@/i18n";
 import {
   buildMonthGrid,
-  dayFilterQuery,
   monthOf,
   todayKey,
   type WeekStart,
 } from "@/lib/calendar-date";
+import { useAllTasks } from "@/lib/task-views";
 
-// Explorer-side glanceable calendar. Notes come from the activity feed the
-// heatmap already loaded (last 90 days, always covering the current month);
-// dues are read straight from the user's task list. Clicking a day filters
-// the timeline to that day.
-//
-// Reminders are exported separately because the explorer keeps them mounted
-// above the trend/calendar switch: switching to the trend view must not hide
-// open work.
+// Reminders shown above the time horizon in the explorer: open tasks due today
+// or overdue. Deep-links straight to /projects where the user can manage and
+// resolve them.
 
-// Open dues inside the visible month grid, keyed by day, plus the two roll-ups
-// the reminders show. Both roll-ups are scoped to the grid so「本月已逾期」keeps
-// meaning this month rather than all time. Mirrors what the mini calendar
-// highlights, so the reminders and the grid never disagree.
 function useOpenTasks(rangeStart: string, rangeEnd: string) {
   const today = useMemo(() => todayKey(), []);
-  const tasksQuery = useQuery({
-    queryKey: ["tasks"],
-    queryFn: () => listTasks(),
-  });
+  const tasksQuery = useAllTasks();
   return useMemo(() => {
     const map = new Map<string, number>();
     let overdue = 0;
@@ -50,97 +33,61 @@ function useOpenTasks(rangeStart: string, rangeEnd: string) {
 
 function currentMonthGrid(locale: string, today: string) {
   const weekStart: WeekStart = locale.startsWith("en") ? "sunday" : "monday";
-  return buildMonthGrid(monthOf(today), weekStart);
+  return buildMonthGrid(monthOf(today), weekStart, true);
 }
 
 export function MiniCalendarReminders() {
   const { locale, t } = useI18n();
   const today = useMemo(() => todayKey(), []);
   const grid = useMemo(() => currentMonthGrid(locale, today), [locale, today]);
-  const { dueToday, map, overdue } = useOpenTasks(
+  const { dueToday, overdue } = useOpenTasks(
     grid[0].key,
     grid[grid.length - 1].key,
   );
-  // The overdue roll-up deep-links to the earliest overdue day's panel; a
-  // focused DayPanel beats a generic calendar for "go fix this".
-  const earliestOverdue = useMemo(() => {
-    let min: string | null = null;
-    for (const key of map.keys()) {
-      if (key >= today) continue;
-      if (min === null || key < min) min = key;
-    }
-    return min;
-  }, [map, today]);
+
   if (dueToday <= 0 && overdue <= 0) return null;
+  // One quiet line per reminder, styled like a sidebar row: a coloured dot
+  // carries the urgency so the text can stay ink instead of shouting red.
   return (
-    <>
+    <div className="-mx-1 mb-2 flex flex-col">
       {dueToday > 0 && (
-        <Link
-          className="mb-1.5 flex items-center gap-1.5 rounded-md px-1 py-1 text-xs font-medium text-brand-700 dark:text-brand-200 bg-brand-100 dark:bg-brand-400/12 motion-safe:transition-colors motion-safe:duration-150 hover:bg-brand-100/80 dark:hover:bg-brand-400/20 focus-visible:ring-2 focus-visible:ring-ring"
-          data-testid="mini-calendar-today-notice"
-          search={{ date: undefined }}
-          to="/calendar"
+        <ReminderLink
+          dotClassName="bg-brand-500"
+          testId="mini-calendar-today-notice"
         >
-          <AlertCircleIcon className="shrink-0" />
           {t("calendar.overdueToday", { count: dueToday })}
-        </Link>
+        </ReminderLink>
       )}
       {overdue > 0 && (
-        <Link
-          className="mb-1 block px-1 text-xs text-destructive underline-offset-2 hover:underline"
-          search={{ date: earliestOverdue ?? undefined }}
-          to="/calendar"
-        >
+        <ReminderLink dotClassName="bg-destructive">
           {t("calendar.overdueCount", { count: overdue })}
-        </Link>
+        </ReminderLink>
       )}
-    </>
+    </div>
   );
 }
 
-export function MiniCalendarPanel({
-  activity,
+function ReminderLink({
+  children,
+  dotClassName,
+  testId,
 }: {
-  activity: MemoStatsResponse["activity"];
+  children: ReactNode;
+  dotClassName: string;
+  testId?: string;
 }) {
-  const { locale } = useI18n();
-  const navigate = useNavigate();
-  const today = useMemo(() => todayKey(), []);
-  const monthKey = monthOf(today);
-  const weekStart: WeekStart = locale.startsWith("en") ? "sunday" : "monday";
-  const grid = useMemo(
-    () => buildMonthGrid(monthKey, weekStart),
-    [monthKey, weekStart],
-  );
-  const rangeStart = grid[0].key;
-  const rangeEnd = grid[grid.length - 1].key;
-  const notes = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const entry of activity) {
-      if (
-        entry.count > 0 &&
-        entry.date >= rangeStart &&
-        entry.date <= rangeEnd
-      ) {
-        map.set(entry.date, entry.count);
-      }
-    }
-    return map;
-  }, [activity, rangeStart, rangeEnd]);
-
-  const { map: openTasks } = useOpenTasks(rangeStart, rangeEnd);
-
-  const jump = (day: string) => {
-    void navigate({ to: `/?q=${encodeURIComponent(dayFilterQuery(day))}` });
-  };
-
   return (
-    <FlareMoMiniCalendar
-      monthKey={monthKey}
-      notes={notes}
-      tasks={openTasks}
-      today={today}
-      onDayClick={jump}
-    />
+    <Link
+      className="flex h-7 items-center gap-2 rounded-md px-2.5 text-xs text-foreground/75 outline-none motion-safe:transition-colors motion-safe:duration-150 hover:bg-muted/70 hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/25"
+      data-testid={testId}
+      search={{ view: "today" }}
+      to="/projects"
+    >
+      <span
+        aria-hidden="true"
+        className={`size-1.5 shrink-0 rounded-full ${dotClassName}`}
+      />
+      <span className="min-w-0 truncate">{children}</span>
+    </Link>
   );
 }

@@ -1,5 +1,7 @@
 import { z } from "zod";
 import {
+  exportMemoryEventSchema,
+  exportMemoryEvidenceSchema,
   exportMemoryRelationSchema,
   exportMemoryResourceLinkSchema,
   exportMemoryRevisionSchema,
@@ -104,8 +106,30 @@ export const listMemosQuerySchema = z.object({
 export const memoStatsQuerySchema = z.object({
   time_zone: z.string().trim().min(1).max(100).default("UTC"),
   // Space-partitioned sidebar stats; absent means the viewer's own corpus
-  // (the historical, Memos-compatible semantics).
+  // (the historical, Memos-compatible semantics). `all` is accepted and
+  // normalized to absent by the route, matching what the memo list and the tag
+  // hierarchy already do — sending it through used to widen the corpus to every
+  // memo the viewer could read, so the sidebar's three number blocks each read
+  // a different set.
   space: memoSpaceSchema.optional(),
+  /**
+   * Length of the trailing `activity` window in local days. The heatmap's year
+   * view needs 366; the default keeps the historical 84-day window. Capped so
+   * one request cannot ask for an unbounded range.
+   */
+  days: z.coerce.number().int().min(1).max(366).default(84),
+  /**
+   * Local date (viewer's zone, YYYY-MM-DD) anchoring the END of the trailing
+   * `activity` window. Absent means today. The year view passes the navigated
+   * year's Dec 31 so a historical year renders its own cells instead of
+   * sharing the trailing-today window, which covers at most its tail (issue
+   * #144). Format-validated only: a future anchor just renders structural
+   * zeros, the same shape the current year's grid already shows past today.
+   */
+  until: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
 });
 
 export const dailyReviewQuerySchema = z.object({
@@ -113,6 +137,18 @@ export const dailyReviewQuerySchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   /** Minutes the viewer's local time is ahead of UTC (e.g. 480 for UTC+8). */
   tzOffset: z.coerce.number().int().min(-840).max(840).default(0),
+});
+
+export const reviewMarkSchema = z.object({
+  memoId: z.string().trim().min(1).max(200),
+  /** The viewer-local day the read happened, YYYY-MM-DD. */
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  action: z.enum(["reviewed", "mute", "unmute"]),
+});
+
+export const reviewSettingsUpdateSchema = z.object({
+  excludedTags: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
+  restoreMuted: z.boolean().optional(),
 });
 
 export const randomMemoQuerySchema = z.object({
@@ -149,6 +185,8 @@ export const attachmentDtoSchema = z.object({
   update_time: z.string(),
   download_url: z.string(),
   preview_url: z.string(),
+  /** Card-sized WebP preview; absent when none was generated at upload. */
+  thumbnail_url: z.string().optional(),
 });
 
 export const memoDtoSchema = z.object({
@@ -175,6 +213,8 @@ export const memoDtoSchema = z.object({
   // even though they cannot edit them.
   can_govern: z.boolean().optional(),
   attachments: z.array(attachmentDtoSchema).optional(),
+  // Comments under this memo the viewer can read (app timeline only).
+  comment_count: z.number().int().nonnegative().optional(),
 });
 
 export const listMemosResponseSchema = z.object({
@@ -329,7 +369,13 @@ const importShareSchema = shareDtoSchema.partial({
 
 export const importBundleSchema = z.object({
   version: z
-    .union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)])
+    .union([
+      z.literal(1),
+      z.literal(2),
+      z.literal(3),
+      z.literal(4),
+      z.literal(5),
+    ])
     .default(1),
   memos: z
     .array(
@@ -369,6 +415,12 @@ export const importBundleSchema = z.object({
     .array(exportMemoryResourceLinkSchema)
     .max(100_000)
     .default([]),
+  // v5: the memory ledger's evidence chain and lifecycle trail joined the
+  // bundle. Both are user-owned source data (not derived state): without them a
+  // round-trip would drop every "why does this fact exist" link and the whole
+  // supersession narrative, which is the product's core promise.
+  memory_evidence: z.array(exportMemoryEvidenceSchema).max(200_000).default([]),
+  memory_events: z.array(exportMemoryEventSchema).max(200_000).default([]),
   // v4: projects/tasks/task_activity joined the self-service bundle. Rows keep
   // their namespaced ids; soft-deleted (recycle-bin) rows travel with
   // `deleted_at` so nothing is silently dropped from a backup.
@@ -550,10 +602,14 @@ export const appNotificationDtoSchema = z.object({
     "memo_mention",
     "daily_review",
     "task_overdue",
+    "task_due",
   ]),
   status: z.enum(["unread", "archived"]),
   // Task-overdue rows have no memo anchor; memo_snippet carries the title.
   memo: z.string().nullable(),
+  // Parent memo for comment notifications (the thread to open).
+  related_memo: z.string().nullable().optional(),
+  sender_name: z.string().optional(),
   memo_snippet: z.string(),
   create_time: z.string(),
 });
@@ -562,6 +618,21 @@ export type CreateMemoInput = z.infer<typeof createMemoSchema>;
 export type UpdateMemoInput = z.infer<typeof updateMemoSchema>;
 export type ListMemosQuery = z.infer<typeof listMemosQuerySchema>;
 export type MemoStatsQuery = z.infer<typeof memoStatsQuerySchema>;
+/**
+ * The pre-validation shape. `time_zone` and `days` carry Zod defaults, so the
+ * parsed output requires them while a direct in-process caller may omit both —
+ * internal callers pass literals instead of round-tripping through the schema.
+ *
+ * `days` is restated as `number` because `z.coerce.number()` types its input as
+ * `unknown` (it accepts anything `Number()` can parse), and that widening would
+ * otherwise land on every internal caller.
+ */
+export type MemoStatsQueryInput = Omit<
+  z.input<typeof memoStatsQuerySchema>,
+  "days"
+> & {
+  days?: number;
+};
 export type MemoVisibility = z.infer<typeof memoVisibilitySchema>;
 export type MemoSpace = z.infer<typeof memoSpaceSchema>;
 export type MemoState = z.infer<typeof memoStatusSchema>;
@@ -575,6 +646,23 @@ export type WalkNextQuery = z.infer<typeof walkNextQuerySchema>;
 export type RelatedMemosQuery = z.infer<typeof relatedMemosQuerySchema>;
 export type ReviewWalkVia = z.infer<typeof reviewWalkViaSchema>;
 export type DailyReviewResponse = { memos: MemoDto[] };
+export type ReviewMarkInput = z.infer<typeof reviewMarkSchema>;
+export type ReviewSettingsUpdate = z.infer<typeof reviewSettingsUpdateSchema>;
+/** Why a note is in today's review: a past year's same day, or its age. */
+export type TodayReviewReason =
+  | { type: "years"; years: number }
+  | { type: "ladder"; days: number };
+export type TodayReviewItem = {
+  memo: MemoDto;
+  reason: TodayReviewReason;
+  /** Already read in today's review (here or on another device). */
+  reviewed: boolean;
+};
+export type TodayReviewResponse = { date: string; items: TodayReviewItem[] };
+export type ReviewSettingsResponse = {
+  excluded_tags: string[];
+  muted_count: number;
+};
 export type RandomMemoResponse = { memo: MemoDto | null };
 export type WalkNextResponse = {
   memo: MemoDto | null;
@@ -625,3 +713,11 @@ export type TagHierarchyResponse = z.infer<typeof tagHierarchyResponseSchema>;
 export type RenameTagInput = z.infer<typeof renameTagRequestSchema>;
 export type RenameTagResponse = z.infer<typeof renameTagResponseSchema>;
 export type DeleteTagResponse = z.infer<typeof deleteTagResponseSchema>;
+
+// A comment is plain prose under its parent memo; it inherits the parent's
+// visibility, so the request carries only the text.
+export const createMemoCommentSchema = z.object({
+  content: z.string().trim().min(1).max(20_000),
+  client_id: z.string().trim().min(1).max(128).optional(),
+});
+export type CreateMemoCommentRequest = z.infer<typeof createMemoCommentSchema>;

@@ -19,7 +19,7 @@
 - `/api/v1/*` 和 `/api/app/*` 复用同一套 domain services。
 - 每个公开 API 都有测试。
 - 每个 release 都有 tag、CHANGELOG、migration notes 和升级说明。
-- 有一套瘦 CI（format / lint / typecheck / 单元测试）作为 push 与外部 PR 的门禁；维护者发布前本地跑 `pnpm verify` 和 `pnpm deploy:dry-run`。GitHub Actions 永远不做生产部署器；用户部署仓库只用受限 workflow 准备上游升级 PR。
+- 有一套瘦 CI（format / lint / typecheck / 单元测试）作为 push 与外部 PR 的门禁；全量 `pnpm verify` 只在维护者明确要求时本地执行，发布默认按改动选择定向检查。GitHub Actions 不在上游或 push 流程中做生产部署；现有自托管 fork/deployment repository 仅可通过受控 `workflow_dispatch` 手动部署，用户部署仓库继续只用受限 workflow 准备上游升级 PR。
 
 ## 公开任务池
 
@@ -27,7 +27,7 @@
 
 - 扩大真实 Memos 客户端兼容矩阵，并补每个已验证客户端的配置示例。
 - Agent Memory 后续：自动固化（会话/工作完成后 LLM 提炼）。
-- 回顾触达渠道：✅ 站内通知已落地（cron 幂等写入 `daily_review` 收件箱，铃铛直达 `/review/daily`）；Web Push 仍为后续；AI 洞察类派生能力（Workers AI 或外部模型）仍为后续。
+- 回顾触达渠道：✅ 站内通知已落地（cron 幂等写入 `daily_review` 收件箱，铃铛直达 `/review/daily`）；✅ Web Push 已落地（VAPID 订阅 + 回顾推送，见 docs/deploy.md 配置小节）；AI 洞察类派生能力（Workers AI 或外部模型）仍为后续。
 - 增加附件生命周期观测面：清理计数、缺失对象报告和可控重试。
 - 扩大浏览器 E2E：Markdown、历史恢复、反向链接、分享撤销和附件预览。
 

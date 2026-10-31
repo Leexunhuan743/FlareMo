@@ -62,7 +62,7 @@ export function LocaleSwitcher({
         type="button"
         aria-label="选择语言 / Select language"
         className={cn(
-          "inline-flex h-8 items-center gap-1.5 rounded-full border border-line/70 bg-surface/90 px-2.5 text-xs font-medium text-ink shadow-2xs transition-colors hover:bg-wash hover:border-line focus:outline-none focus:ring-1 focus:ring-signal/40 cursor-pointer",
+          "inline-flex h-8 items-center gap-1.5 rounded-full border border-line/70 bg-surface/90 px-2.5 text-xs font-medium text-ink shadow-2xs transition-colors hover:bg-wash hover:border-line focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal/50 focus-visible:ring-offset-2 focus-visible:ring-offset-paper cursor-pointer",
           className,
         )}
       >
@@ -74,7 +74,7 @@ export function LocaleSwitcher({
       </DropdownMenuTrigger>
 
       <DropdownMenuContent align="end" className="w-44 p-1.5">
-        <DropdownMenuLabel className="px-2 py-1 text-[10px] text-fog font-medium">
+        <DropdownMenuLabel className="px-2 py-1 text-xs text-fog font-medium">
           语言 / Language
         </DropdownMenuLabel>
         <DropdownMenuSeparator />

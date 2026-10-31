@@ -2,7 +2,7 @@
 
 <p align="center">
   <b>Zero Servers · Zero Upkeep · 24/7 Global Edge Uptime · Absolute Data Ownership</b><br>
-  For individuals: a quiet, focused thought capture space and second brain. For teams: a shared knowledge base with fine-grained roles.
+  For individuals: a quiet, focused thought capture space and second brain. For teams: a shared space to publish notes to each other, with fine-grained roles.
 </p>
 
 <p align="center">
@@ -31,6 +31,10 @@
 | :---: | :---: | :---: |
 | <img src="./docs/assets/flaremo-desktop-light.png" width="360" alt="FlareMo Desktop Light Mode" /> | <img src="./docs/assets/flaremo-desktop-dark.png" width="360" alt="FlareMo Desktop Dark Mode" /> | <img src="./docs/assets/flaremo-mobile.png" width="168" alt="FlareMo Mobile Mode" /> |
 
+| ✅ To-dos, projects and review | 📄 Articles you can publish |
+| :---: | :---: |
+| <img src="./docs/assets/flaremo-tasks.png" width="560" alt="To-dos, projects and review" /> | <img src="./docs/assets/flaremo-articles.png" width="560" alt="Articles you can publish" /> |
+
 <sub>Actual live screenshots: seamless light/dark mode switching and full-featured mobile responsiveness. Every feature shown is wired to working backend capabilities.</sub>
 
 </div>
@@ -39,14 +43,14 @@
 
 ## 💡 Why FlareMo?
 
-Tools like Flomo and Memos proved the immense value of low-friction memo capture and a distraction-free timeline. However, self-hosting a traditional note-taking setup typically means paying for a VPS, configuring Docker and PostgreSQL, scripting automated backups, and dreading disk or hardware failures.
+Low-friction memo capture and a distraction-free timeline have proved their value. Self-hosting a traditional note-taking setup, though, typically means paying for a VPS, configuring Docker and PostgreSQL, scripting automated backups, and dreading disk or hardware failures.
 
 FlareMo answers a simpler question: **Can you get a 24/7 online, resilient, globally accelerated knowledge base with zero server maintenance, using just a free Cloudflare account?**
 
 - **Truly Serverless**: Both code and static assets run on Cloudflare Workers edge nodes near you with millisecond latency.
 - **Enterprise-grade durability out of the box**: Cloudflare D1 handles notes and metadata; Cloudflare R2 stores media attachments with multi-region replication.
-- **AI-Native Second Brain**: Built-in MCP endpoints and Agent Memory hub allow AI agents (Claude, Cursor, Codex, ChatGPT) to read and update your long-term preferences and memory scopes.
-- **Quiet for one, powerful for many**: Default is an encrypted, private single-user sanctuary. Enable team mode, and it instantly transforms into a collaborative workspace with roles and three-tier visibility.
+- **AI-Native Second Brain**: Agent Memory hub ships a CLI and a cross-agent skill so AI agents (Claude, Cursor, Codex, ChatGPT, ZCode) can read and update your long-term preferences and memory scopes; MCP endpoints are also available.
+- **Quiet for one, powerful for many**: Default is an encrypted, private single-user sanctuary. Enable team mode to add a shared team space with roles and three-tier visibility — for sharing notes, not for running projects together.
 - **Minimal, not simplistic**: The interface stays quiet and every control earns its place — nothing decorative shouting for attention, nothing useful missing.
 
 ---
@@ -55,36 +59,42 @@ FlareMo answers a simpler question: **Can you get a 24/7 online, resilient, glob
 
 ### 1. Instant Capture & Inspiring Review
 - **Capture in milliseconds**: Card-style timeline, tags, Markdown/GFM, and previews for image and audio attachments.
+- **Notes and articles**: The composer stays a quick note (tags, up to 9 images, bold, lists, to-dos); "Write full screen" opens the same note in a full-screen canvas. Articles are written from the Articles page.
+- **Comments under the note**: Comment on any note, in your personal space or the team space, Weibo-style. Comments live under the original note and stay out of the timeline, search, stats, tags, and review.
 - **Lightning-fast search**: SQLite FTS5 full-text indexing with query operators (`has:attachment`, `is:pinned`, `before:YYYY-MM-DD`, `after:YYYY-MM-DD`, `in:timeline|archive|trash`).
 - **Semantic "Find" (Vector Search)**: Workers AI embeddings paired with Vectorize derived vector indexes for contextual recall; re-verifies permissions against D1 and seamlessly falls back to FTS5.
 - **Thought activation**: Built-in **Daily Review** (on this day), **Random Walk** (wandering through tag and backlink graphs with postcard summaries), and related note recommendations.
 - **Revision history**: Full version diffs and one-click historical restore.
 
-### 2. AI Long-term Memory & Native MCP
-- **Agent Memory**: Through `/memory/mcp`, AI agents can record and update cross-session long-term memory (preferences, project decisions, constraints, lessons).
+### 2. AI Long-term Memory (CLI + Skills)
+- **Agent Memory**: Ships `flaremo` CLI and the `flaremo-memory` skill — agents record and update cross-session long-term memory (preferences, project decisions, constraints, lessons) through a shared REST base.
 - **Human in the loop**: Review, verify, lock, or correct AI-recorded memories at `/memory`.
-- **Open ecosystem**: Standard `/mcp` (Streamable HTTP MCP) endpoint to query and append notes programmatically.
+- **Open ecosystem**: CLI + Skills are the recommended path; `/memory/mcp` (Streamable HTTP MCP) and `/mcp` endpoints are available for existing MCP clients.
 
-### 3. Projects & Tasks
-- **Group work under projects**: Organize notes and to-dos into projects, with a kanban board (drag between status columns), priorities, manual sort order, and due dates.
+### 3. To-dos & Projects
+- **Schedule a note**: Pick a day and a project for a note; each unchecked to-do in it becomes a task. Checking it off in the note or on the to-do page stays in sync both ways.
+- **One to-do page**: `/projects` shows **Today**, **Next 7 days**, and **All tasks** as day-grouped lists, plus your projects as kanban boards (drag between status columns, priorities, manual order). Every list has a quick-add row.
 - **Personal by design, reversible deletion**: Tasks belong to a single owner; deleting moves them to a recycle bin until restored or automatically purged.
 
-### 4. Calendar
-- **Tasks are the schedule's source of truth**: The `/calendar` month view fills past days with what you wrote and future days with what's due — drag to reschedule, quick-add dated tasks, or scan the agenda list.
-- **Overdue reminders**: Overdue tasks raise in-app notifications, with optional browser Web Push.
+### 4. Reminders & Time Horizons
+- **Badges where you read**: Scheduled notes show "to-dos n/m · date · project" on the card, and Daily Review opens with today's to-dos.
+- **Time horizons at a glance**: The explorer home view pairs a mini month calendar with overdue/today reminders, so what's due never hides behind the board.
+- **Due and overdue reminders**: A daily job raises "due today" and overdue notifications in the app, with optional browser Web Push. Schedules are day-level; there are no clock-time alarms.
 
-### 5. Team Collaboration & 3-Tier Visibility
+### 5. Team Space & 3-Tier Visibility
+- **Sharing, not collaboration**: The team space is where members publish notes to each other and comment on them. `@username` mentions autocomplete in the team composer and notify the person mentioned; notifications open the original note at its comments.
 - **Role governance**: `owner`, `admin`, and `member` roles. Admins invite members via one-time activation links (members choose their own passwords; admins never handle plaintext credentials).
 - **3-tier visibility**:
   - 🔒 **Private**: Only author can view.
   - 👥 **Team**: Shared read-only with active team members.
   - 🌐 **Public**: Anonymous read-only via time-limited share links.
 - **Safe offboarding**: Removing a member triggers reliable background cleanup that purges private data while preserving team and public notes.
+- **Reader seats**: Grant a time-boxed read-only seat — guest readers, course cohorts, client delivery. Seats lapse automatically at their expiry (fail-closed at credential resolution, no cron needed). Manage them from the members page, or provision by email through `PUT /api/app/admin/team/reader` with a Personal Access Token (see `docs/team-mode.md`).
 
 ### 6. Offline First & PWA Experience
 - **Installable PWA**: Install to macOS, Windows, iOS, or Android home screen with native feel.
 - **Reliable offline sync**: Drafts save locally instantly. Offline submissions and uploads queue up and replay automatically when connectivity is restored.
-- **Live voice capture**: Access `/capture` for real-time streaming speech-to-text (ASR) transcription.
+- **Live voice input**: The composer's microphone button streams speech-to-text (ASR) into the draft as you speak.
 
 ### 7. Secure Better Auth Application Security
 - **Better Auth powered**: HttpOnly, `SameSite=Lax` browser cookie sessions; revocable `memos_pat_` Personal Access Tokens for scripts, CLI, and MCP.
@@ -93,9 +103,16 @@ FlareMo answers a simpler question: **Can you get a 24/7 online, resilient, glob
 ### 8. Memos Compatibility & Seamless Migration
 - **Memos `/api/v1` compatibility**: Provides core Memos API endpoints (camelCase default, legacy snake_case via header) and OpenAPI schema.
 - **Third-party apps ready**: Works directly with mobile clients like Moe Memos.
-- **Bi-directional import & export**: One-click import from Memos / flomo with conflict strategies and full raw export bundles.
+- **Bi-directional import & export**: Full raw export bundles, one-click import with conflict strategies, plus a converter for Memos 0.31 exports ([guide](./docs/en/import-from-memos.md)).
 
 ---
+
+### 9. Plugin System: Cards as Plugins
+- **Five built-in cards**: Plain, Daily, Ticket, Postcard, plus a canvas-drawn Postmark demo.
+- **Store and curation**: browse directories, one-click install (SHA-256 verified), enable/disable, reorder, set the default, hide — all in account settings. The official directory lives at [flaremo.app/plugins](https://flaremo.app/plugins/registry.json).
+- **Upload your own**: admins can install a local package — it exists only on that instance and is never sent anywhere.
+- **Authoring tools**: `pnpm plugin:new` scaffolds, `pnpm plugin:check` validates with the **exact rules instances enforce on install**, `pnpm plugins:build` packages. Document cards are pure JSON layouts; sandbox cards run your own HTML/CSS/JS. See the [plugin guide](./docs/en/plugins.md).
+- **Safe by default**: cards run in an opaque-origin sandbox with **no network access**; community and brand packs stay off until an admin enables them.
 
 ## 📊 How Generous Is Cloudflare's Free Tier?
 
@@ -127,16 +144,16 @@ Many assume "free" means "severely limited". For text-heavy personal knowledge b
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/realchendahuang/FlareMo)
 
-Clones the repository into your GitHub account and provisions D1, R2, Queues, and Vectorize automatically. After the initial deploy, set `FLAREMO_PUBLIC_URL` and secrets (see [docs/deploy.md](./docs/deploy.md#one-click-deploy-community-supported)). If the first attempt reports "Github API Limit Exceeded", wait a few minutes and retry.
+Clones the repository into your GitHub account and provisions D1, R2, Queues, and Vectorize automatically. After the initial deploy, set `FLAREMO_PUBLIC_URL` and secrets (see [docs/en/deploy.md](./docs/en/deploy.md#one-click-deploy-community-supported)). If the first attempt reports "Github API Limit Exceeded", wait a few minutes and retry.
 
 ### Method 2: GitHub Action (self-hosted fork)
 
-On your fork, run **Deploy to Cloudflare** from Actions to provision resources, publish the Worker, and sync auth secrets. Pushes do not publish. See [docs/github-action-deploy.md](./docs/github-action-deploy.md) or the [English guide](./docs/en/github-action-deploy.md).
+On your fork, run **Deploy to Cloudflare** from Actions to provision resources, publish the Worker, and sync auth secrets. Pushes do not publish. See [docs/en/github-action-deploy.md](./docs/en/github-action-deploy.md).
 
 ### Method 3: Deploy with an AI Agent (Recommended)
 
-Give the repository to an agent capable of executing terminal commands (e.g. Claude Code, Cursor Agent, Codex) along with [docs/agent-deploy.md](./docs/agent-deploy.md):
-> "Please deploy FlareMo to my Cloudflare account following docs/agent-deploy.md."
+Give the repository to an agent capable of executing terminal commands (e.g. Claude Code, Cursor Agent, Codex) along with [docs/en/agent-deploy.md](./docs/en/agent-deploy.md):
+> "Please deploy FlareMo to my Cloudflare account following docs/en/agent-deploy.md."
 
 ---
 
@@ -170,7 +187,7 @@ pnpm deploy
 (The full `pnpm verify` gate runs only when the maintainer explicitly asks for it.)
 Visit your production domain at `/setup` and enter the `FLAREMO_BOOTSTRAP_SECRET` to initialize your Owner account.
 
-Detailed guides: [Deployment Guide](./docs/deploy.md) · [GitHub Action deploy](./docs/github-action-deploy.md) · [Update Guide](./docs/update.md).
+Detailed guides: [Deployment Guide](./docs/en/deploy.md) · [GitHub Action deploy](./docs/en/github-action-deploy.md) · [Update Guide](./docs/en/update.md).
 
 ---
 
@@ -194,6 +211,7 @@ flowchart LR
 - **Storage**: Cloudflare R2
 - **Auth**: Better Auth (HttpOnly cookie session + revocable `memos_pat_`)
 - **AI & Search**: Workers AI, Vectorize, SQLite FTS5
+- **Plugins**: slot-based extension platform ([standard](./docs/plugin-platform-standard.md), [guide](./docs/en/plugins.md)); packages live in R2, sandboxed cards run without network access
 
 ---
 

@@ -1,7 +1,9 @@
-import type { CalendarView } from "@flaremo/contracts";
+import type { CalendarView, HourlyActivityResponse } from "@flaremo/contracts";
 import type { FlareMoDb, UserRow } from "@flaremo/db";
 import { memos, tasks } from "@flaremo/db";
 import { and, asc, eq, gte, inArray, isNull, lt, sql } from "drizzle-orm";
+import { notComment } from "./memo-comment-filter";
+import { readHourlyCountsInRange } from "./memo-hourly-counts";
 import { nextDayKey, taskToDto } from "./tasks";
 
 // The calendar is a presentation of data that already has a home: notes keep
@@ -45,6 +47,7 @@ export async function getCalendarView(
           inArray(memos.status, ["normal", "archived"]),
           gte(memos.createdAt, startUtc.toISOString()),
           lt(memos.createdAt, endUtc.toISOString()),
+          notComment(),
         ),
       )
       .groupBy(
@@ -66,6 +69,7 @@ export async function getCalendarView(
           inArray(memos.status, ["normal", "archived"]),
           gte(memos.createdAt, startUtc.toISOString()),
           lt(memos.createdAt, endUtc.toISOString()),
+          notComment(),
           sql`(
             json_extract(${memos.payload}, '$.property.has_incomplete_tasks') = 1
             OR (
@@ -103,5 +107,76 @@ export async function getCalendarView(
     notes: noteRows,
     note_tasks: noteTaskRows,
     tasks: taskRows.map(taskToDto),
+  };
+}
+
+/**
+ * Returns the number of memos created in each local hour (0–23) for a single
+ * calendar day. All 24 slots are always present; empty hours have count 0.
+ *
+ * Timezone handling mirrors getCalendarView: `tz` is the client's
+ * Date#getTimezoneOffset() (UTC − local in minutes). UTC+8 sends −480;
+ * offsetMinutes = −(−480) = +480, so datetime(created_at, '+480 minutes')
+ * yields the local wall-clock time.
+ */
+export async function getHourlyActivity(
+  db: FlareMoDb,
+  user: UserRow,
+  query: { date?: string; from?: string; to?: string; tz?: number },
+): Promise<HourlyActivityResponse> {
+  const fromDate = query.from ?? query.date;
+  const toDate = query.to ?? query.date;
+  if (!fromDate || !toDate) {
+    return { hours: [] };
+  }
+  const offsetMinutes = -(query.tz ?? 0);
+  const boundShift = (query.tz ?? 0) * 60_000;
+  // Inclusive local-day bounds converted to UTC instants.
+  const startUtc = new Date(
+    new Date(`${fromDate}T00:00:00Z`).getTime() + boundShift,
+  );
+  const endUtc = new Date(
+    new Date(`${toDate}T00:00:00Z`).getTime() +
+      24 * 60 * 60 * 1000 +
+      boundShift,
+  );
+
+  // Counts come from the maintained hourly counter, which is bucketed by UTC
+  // hour and kept off the memo table. A local hour spans at most two UTC
+  // hours, so each bucket is split by the minute the local day boundary falls
+  // at; the heatmap only needs the hour, and the same rule attributes a
+  // half-hour zone's boundary bucket to the local hour containing its end.
+  const rows = await readHourlyCountsInRange(
+    db,
+    user.id,
+    startUtc.toISOString().slice(0, 13),
+    new Date(endUtc.getTime() - 1).toISOString().slice(0, 13),
+  );
+  const byDateHour = new Map<string, number>();
+  for (const row of rows) {
+    const local = new Date(
+      Date.parse(`${row.utcHour}:00:00.000Z`) + offsetMinutes * 60_000,
+    );
+    const key = `${local.toISOString().slice(0, 10)}_${local.getUTCHours()}`;
+    byDateHour.set(key, (byDateHour.get(key) ?? 0) + row.normal + row.archived);
+  }
+
+  const result: Array<{ date: string; hour: number; count: number }> = [];
+  const cur = new Date(`${fromDate}T12:00:00Z`);
+  const end = new Date(`${toDate}T12:00:00Z`);
+  while (cur.getTime() <= end.getTime()) {
+    const dStr = cur.toISOString().slice(0, 10);
+    for (let h = 0; h < 24; h++) {
+      result.push({
+        date: dStr,
+        hour: h,
+        count: byDateHour.get(`${dStr}_${h}`) ?? 0,
+      });
+    }
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+
+  return {
+    hours: result,
   };
 }

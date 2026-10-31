@@ -1,87 +1,34 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
 import type { Editor } from "@tiptap/react";
 import {
-  ArchiveIcon,
-  CircleIcon,
-  Edit3Icon,
-  Globe2Icon,
-  Loader2Icon,
-  LockIcon,
-  MicIcon,
-  MoreHorizontalIcon,
-  PinIcon,
-  RotateCcwIcon,
-  Share2Icon,
-  ShieldIcon,
-  Trash2Icon,
-} from "lucide-react";
-import { memo, Suspense, useMemo, useRef, useState } from "react";
-import { toast } from "sonner";
-import type { Attachment, Memo, MemoState, MemoVisibility, Share } from "@/api";
+  type Dispatch,
+  memo,
+  type SetStateAction,
+  useCallback,
+  useRef,
+  useState,
+} from "react";
+import type { Attachment, Memo, MemoVisibility, Share } from "@/api";
 import {
-  createTask,
-  getMemoContext,
-  getRelatedMemos,
-  uploadAttachment,
-} from "@/api";
-import { AttachmentGallery } from "@/components/attachment-gallery";
-import { LazyMemoContent } from "@/components/lazy-memo-content";
-import { MemoSearchExcerpt } from "@/components/memo-search-excerpt";
-import { RichComposerEditor } from "@/components/rich-composer-editor-lazy";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { useI18n } from "@/i18n";
-import {
-  createImageDimensionResolver,
-  filterUnreferencedAttachments,
-} from "@/lib/attachment-refs";
-import { errorMessage } from "@/lib/error";
-import {
-  extractTags,
-  formatMemoRelativeTime,
-  formatMemoTime,
-  getMemoResourceId,
-} from "@/lib/memo";
-import { countTaskItems, toggleMemoTaskLine } from "@/lib/memo-tasks";
-import { uploadAndInsertImages } from "@/lib/rich-editor-upload";
-import { formatClock } from "@/lib/transcript";
+  canOpenMemoThread,
+  MemoCardBody,
+  MemoCommentButton,
+} from "@/components/memo-card/memo-card-body";
+import { MemoCardEditor } from "@/components/memo-card/memo-card-editor";
+import { MemoCardHeader } from "@/components/memo-card/memo-card-header";
+import { useMemoCardActions } from "@/components/memo-card/use-memo-card-actions";
+import { MemoComments } from "@/components/memo-comments";
 import { cn } from "@/lib/utils";
-
-/** Bodies beyond this size collapse in the timeline. */
-const COLLAPSE_THRESHOLD = 600;
 
 type MemoCardProps = {
   memo: Memo;
   attachments: Attachment[];
   onArchive: (id: string) => void;
   onPin: (id: string, pinned: boolean) => void;
-  onShare: (id: string) => void;
+  /** Creates (or reuses) the memo's public share and resolves with it, so a
+      caller that has no share yet can still obtain the token in one step. */
+  onShare: (id: string) => Promise<Share>;
+  /** Tear down the public link after a memo leaves "public". */
+  onRevokeShare?: (share: Share) => void;
   onUpdate: (
     id: string,
     input: { content: string; visibility: MemoVisibility },
@@ -98,7 +45,27 @@ type MemoCardProps = {
   canManage?: boolean;
   /** Lifecycle governance (archive/trash/restore) without content editing. */
   canGovern?: boolean;
+  /** Focused via J/K keyboard navigation. */
+  isFocused?: boolean;
+  onRequestDelete?: (memo: Memo) => void;
+  onRequestShareImage?: (memo: Memo) => void;
+  onRequestVisibility?: (memo: Memo) => void;
+  /**
+   * Reports whether this card holds unsaved editor state. The virtualized
+   * timeline uses it to keep such a card mounted: unmounting mid-edit would
+   * discard the draft the user is still typing.
+   */
+  onEditingChange?: (memoName: string, editing: boolean) => void;
+  /** The workspace has a team someone else is in: every live card can be
+      commented on in place. */
+  commentsEnabled?: boolean;
 };
+
+/**
+ * Threads the reader opened, by memo id. The virtualized timeline remounts
+ * cards as they scroll back into view; an open thread stays open.
+ */
+const openThreads = new Set<string>();
 
 export const MemoCard = memo(function MemoCard({
   memo,
@@ -106,6 +73,7 @@ export const MemoCard = memo(function MemoCard({
   onArchive,
   onPin,
   onShare,
+  onRevokeShare,
   onUpdate,
   onTrash,
   onRestore,
@@ -116,578 +84,162 @@ export const MemoCard = memo(function MemoCard({
   onTagClick,
   canManage = false,
   canGovern = false,
+  isFocused = false,
+  onRequestDelete,
+  onRequestShareImage,
+  onRequestVisibility,
+  onEditingChange,
+  commentsEnabled = false,
 }: MemoCardProps) {
-  const { locale, t } = useI18n();
-  const queryClient = useQueryClient();
-  const id = getMemoResourceId(memo);
-  const shareUrl = share
-    ? `${globalThis.location.origin}/share/${share.token}`
-    : undefined;
-  const tags = memo.payload.tags ?? extractTags(memo.content);
-  const isTrashed = memo.state === "trashed";
-  // Body-referenced images render inline; the gallery keeps only the rest.
-  const galleryAttachments = filterUnreferencedAttachments(
-    attachments,
-    memo.content,
-  );
-  // Long bodies (transcripts, articles) collapse so one memo cannot dominate
-  // the timeline. Expanded state is per-card and resets on remount.
-  const isCollapsible =
-    memo.content.length > COLLAPSE_THRESHOLD ||
-    memo.content.split("\n").length > 12;
+  // Expansion is per-card and resets on remount; it outlives an edit
+  // round-trip, so it stays above the body/editor switch.
   const [expanded, setExpanded] = useState(false);
-  const collapsed = isCollapsible && !expanded;
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isUploadingInline, setIsUploadingInline] = useState(false);
-  // Hovering the title telegraphs "opening the detail page": warm its two
-  // queries so the route paints with data instead of a full-page skeleton.
-  const prefetchDetail = () => {
-    void queryClient.prefetchQuery({
-      queryKey: ["memo-context", memo.id],
-      queryFn: () => getMemoContext(memo.id),
-    });
-    void queryClient.prefetchQuery({
-      queryKey: ["memo-related", memo.id],
-      queryFn: () => getRelatedMemos(memo.id),
-    });
-  };
-  // Intrinsic boxes for body images: uploaded dimensions ride the
-  // attachments list, so a photo the author placed inline never shoves the
-  // cards below it aside while loading.
-  const resolveImageDimensions = useMemo(
-    () => createImageDimensionResolver(attachments),
-    [attachments],
-  );
-  // Task-list checkboxes are clickable for editors: LazyMemoContent maps the
-  // rendered checkbox back to its source line and D2 rewrites just that
-  // marker through the memo update mutation (optimistic, so it settles fast).
-  const taskCount = useMemo(() => countTaskItems(memo.content), [memo.content]);
-  const convertTaskMutation = useMutation({
-    mutationFn: (title: string) =>
-      createTask({ title, source_memo_id: memo.name }),
-    onSuccess: () => {
-      toast.success(t("toast.taskCreated"));
-      void queryClient.invalidateQueries({ queryKey: ["tasks"] });
-    },
-    onError: (error) =>
-      toast.error(errorMessage(error, t("toast.taskCreateFailed"))),
-  });
-  const taskInteraction =
-    !canManage || isTrashed
-      ? undefined
-      : {
-          onToggleTask: (lineIndex: number) => {
-            const next = toggleMemoTaskLine(memo.content, lineIndex);
-            if (next) {
-              void onUpdate(id, {
-                content: next,
-                visibility: memo.visibility,
-              });
-            }
-          },
-          onConvertTask: (_lineIndex: number, text: string) => {
-            convertTaskMutation.mutate(text);
-          },
-        };
-
-  // Editing an existing memo: pasted images upload bound to the memo right
-  // away, so a cancelled edit leaves nothing to clean up except an
-  // unreferenced (but owned) attachment in the gallery. Each file shows an
-  // "uploading…" chip until its reference lands at the chip's position.
-  const insertInlineImages = (files: File[], position: number) => {
-    if (files.length === 0) return;
-    setIsUploadingInline(true);
-    void uploadAndInsertImages({
-      editorRef: editEditorRef,
-      files,
-      position,
-      upload: (file) => uploadAttachment({ file, memo: memo.name }),
-      onError: () => toast.error(t("composer.imageUploadFailed")),
-    }).finally(() => setIsUploadingInline(false));
-  };
-  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [draftContent, setDraftContent] = useState(memo.content);
+  // Card-owned, like the states above: an upload that outlives the editor
+  // session (Esc while a paste is still settling) keeps its target.
   const editEditorRef = useRef<Editor | null>(null);
-  const [isShareOpen, setIsShareOpen] = useState(false);
-  const [shareVisibility, setShareVisibility] = useState<MemoVisibility>(
-    memo.visibility,
+  const isTrashed = memo.state === "trashed";
+  const [commentsOpen, setCommentsOpen] = useState(() =>
+    openThreads.has(memo.id),
   );
-  const [isSharing, setIsSharing] = useState(false);
+  // Focus the reply box only when the reader just opened the thread, not
+  // when a remount restores it.
+  const [focusReply, setFocusReply] = useState(false);
+  const toggleComments = useCallback(() => {
+    setCommentsOpen((open) => {
+      const next = !open;
+      if (next) openThreads.add(memo.id);
+      else openThreads.delete(memo.id);
+      return next;
+    });
+    setFocusReply(true);
+  }, [memo.id]);
+
+  // The virtualized list may unmount a card at any scroll offset. While the
+  // editor is open that would throw away the draft, so every write to
+  // `isEditing` — including the one inside useMemoCardActions' save path —
+  // goes through this wrapper, which reports the state to the list.
+  // The report happens beside the state write, not inside an updater:
+  // updaters run during render, and setting the list's state from there is
+  // React's "cannot update a component while rendering another" error.
+  const editingRef = useRef(false);
+  const setEditing = useCallback<Dispatch<SetStateAction<boolean>>>(
+    (value) => {
+      const previous = editingRef.current;
+      const next = typeof value === "function" ? value(previous) : value;
+      if (next === previous) return;
+      editingRef.current = next;
+      setIsEditing(next);
+      onEditingChange?.(memo.name, next);
+    },
+    [memo.name, onEditingChange],
+  );
+
+  const { changeVisibility, id, prefetchDetail, saveEditing, taskInteraction } =
+    useMemoCardActions({
+      canManage,
+      draftContent,
+      isTrashed,
+      memo,
+      onRevokeShare,
+      onShare,
+      onUpdate,
+      share,
+      setIsEditing: setEditing,
+      setIsSaving,
+    });
+
+  const canOpenThread = canOpenMemoThread(memo, commentsEnabled);
 
   const startEditing = () => {
     setDraftContent(memo.content);
-    setIsEditing(true);
+    setEditing(true);
   };
 
-  const openShareDialog = () => {
-    setShareVisibility(memo.visibility);
-    setIsShareOpen(true);
-  };
-
-  // Feishu-style share panel: visibility changed after publishing; picking
-  // the public option also provisions the public link token.
-  const saveSharing = async () => {
-    setIsSharing(true);
-    try {
-      await onUpdate(id, {
-        content: memo.content,
-        visibility: shareVisibility,
-      });
-      if (shareVisibility === "public" && !share) {
-        onShare(id);
-      }
-      setIsShareOpen(false);
-    } catch {
-      // The mutation displays the error and the dialog stays open.
-    } finally {
-      setIsSharing(false);
-    }
-  };
-
-  const saveEditing = async () => {
-    setIsSaving(true);
-    try {
-      await onUpdate(id, {
-        content: draftContent,
-        visibility: memo.visibility,
-      });
-      setIsEditing(false);
-    } catch {
-      // The mutation displays the error and the editor stays open.
-    } finally {
-      setIsSaving(false);
-    }
-  };
+  const stopEditing = () => setEditing(false);
+  const beginEditing = startEditing;
 
   return (
     <article
+      data-memo-id={memo.id}
       className={cn(
-        "group relative flex w-full flex-col gap-2 rounded-xl border border-border/50 bg-card/60 px-3.5 py-4 text-card-foreground [content-visibility:auto] [contain-intrinsic-size:auto_120px] motion-safe:animate-rise motion-safe:transition-[background-color,border-color,transform,box-shadow] motion-safe:duration-150 hover:border-border hover:bg-card hover:shadow-xs motion-safe:hover:-translate-y-px",
+        "paper group relative flex w-full flex-col gap-2 rounded-xl border border-border/60 bg-card px-4 py-3.5 text-card-foreground shadow-xs [content-visibility:auto] [contain-intrinsic-size:auto_120px] motion-safe:animate-rise motion-safe:transition-[border-color,box-shadow] motion-safe:duration-150 hover:border-border hover:shadow-sm sm:px-5 sm:py-4",
+        // Pinned: a slim inset ember bar (one of the four places the brand
+        // gradient is allowed), instead of a thick colored border.
         memo.pinned &&
-          "border-brand-300/40 bg-brand-50/35 dark:border-brand-400/25 dark:bg-brand-400/5",
-        isEditing && "bg-card shadow-xs ring-1 ring-brand-400/40",
+          "before:pointer-events-none before:absolute before:inset-y-4 before:start-0 before:w-[3px] before:rounded-e-full before:bg-brand-gradient",
+        isFocused && "border-ring/60 ring-3 ring-ring/20",
+        isEditing && "border-ring/50 shadow-sm ring-3 ring-ring/15",
       )}
       style={{ animationDelay: `${Math.min(index, 7) * 35}ms` }}
     >
-      {memo.pinned && (
-        <span
-          aria-hidden="true"
-          className="bg-brand-gradient absolute top-4 bottom-4 left-0 w-[3px] rounded-full"
-        />
-      )}
-      {!memo.pinned && memo.visibility !== "private" && (
-        // Team identity strip: shared notes carry a left marker so the mixed
-        // timeline reads personal vs team at a glance; pinned notes already
-        // occupy the slot with the brand gradient.
-        <span
-          aria-hidden="true"
-          className="absolute top-4 bottom-4 left-0 w-[3px] rounded-full bg-emerald-400/60 dark:bg-emerald-400/40"
-        />
-      )}
-      <div className="flex w-full items-center justify-between gap-2">
-        <Link
-          className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
-          onFocus={prefetchDetail}
-          onMouseEnter={prefetchDetail}
-          params={{ memoId: memo.id }}
-          title={formatMemoTime(memo.display_time, locale)}
-          to="/memo/$memoId"
-        >
-          {memo.pinned ? (
-            <PinIcon className="text-brand-500 dark:text-brand-400" />
-          ) : (
-            <CircleIcon className="opacity-35" />
-          )}
-          <span className="truncate tabular-nums">
-            {formatMemoRelativeTime(memo.display_time, locale)}
-          </span>
-          {/* Author belongs to the shared spaces: a personal note has no
-              audience besides its author, so the name is noise there. */}
-          {memo.visibility !== "private" && memo.creator_name && (
-            <span>· {memo.creator_name}</span>
-          )}
-        </Link>
-        <div className="flex shrink-0 items-center gap-1">
-          {memo.source === "voice" && <VoiceBadge memo={memo} />}
-          {memo.visibility !== "private" && (
-            <VisibilityBadge visibility={memo.visibility} />
-          )}
-          {(canManage || canGovern) && (
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                render={
-                  <Button
-                    aria-label={t("common.actions")}
-                    className="opacity-100 motion-safe:transition-opacity md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100"
-                    size="icon-sm"
-                    variant="ghost"
-                  >
-                    <MoreHorizontalIcon />
-                  </Button>
-                }
-              />
-              <DropdownMenuContent align="end">
-                <DropdownMenuGroup>
-                  {isTrashed ? (
-                    <>
-                      {canGovern && (
-                        <DropdownMenuItem onClick={() => onRestore(id)}>
-                          <RotateCcwIcon />
-                          {t("memo.restore")}
-                        </DropdownMenuItem>
-                      )}
-                      {canManage && (
-                        <DropdownMenuItem
-                          variant="destructive"
-                          onClick={() => setIsDeleteDialogOpen(true)}
-                        >
-                          <Trash2Icon />
-                          {t("memo.deleteForever")}
-                        </DropdownMenuItem>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      {canManage && (
-                        <DropdownMenuItem onClick={startEditing}>
-                          <Edit3Icon />
-                          {t("common.edit")}
-                        </DropdownMenuItem>
-                      )}
-                      {canManage && (
-                        <DropdownMenuItem
-                          onClick={() => onPin(id, !memo.pinned)}
-                        >
-                          <PinIcon />
-                          {memo.pinned ? t("memo.unpin") : t("memo.pin")}
-                        </DropdownMenuItem>
-                      )}
-                      {canGovern && (
-                        <DropdownMenuItem onClick={() => onArchive(id)}>
-                          <ArchiveIcon />
-                          {memo.state === "archived"
-                            ? t("memo.moveToTimeline")
-                            : t("view.archive")}
-                        </DropdownMenuItem>
-                      )}
-                      {canManage && (
-                        <DropdownMenuItem onClick={openShareDialog}>
-                          <Share2Icon />
-                          {t("memo.share")}
-                        </DropdownMenuItem>
-                      )}
-                      {canGovern && (
-                        <DropdownMenuItem onClick={() => onTrash(id)}>
-                          <Trash2Icon />
-                          {t("memo.moveToTrash")}
-                        </DropdownMenuItem>
-                      )}
-                    </>
-                  )}
-                </DropdownMenuGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-        </div>
-      </div>
-      {isEditing ? (
-        <div className="flex flex-col gap-3 motion-safe:animate-fade">
-          <Suspense
-            fallback={
-              <div className="min-h-32 bg-muted/30" aria-hidden="true" />
-            }
-          >
-            <RichComposerEditor
-              ariaLabel={t("common.edit")}
-              autoFocus
-              content={draftContent}
-              disabled={isSaving}
-              editorRef={editEditorRef}
-              onContentChange={setDraftContent}
-              onEscape={() => setIsEditing(false)}
-              onImageFiles={insertInlineImages}
-              inputId="flaremo-card-editor-input"
-              onSubmitRequest={() => {
-                if (!isUploadingInline) void saveEditing();
-              }}
-              placeholder={t("composer.placeholder")}
-              submitOnEnter={false}
+      <MemoCardHeader
+        commentAction={
+          canOpenThread ? (
+            <MemoCommentButton
+              count={memo.comment_count ?? 0}
+              open={commentsOpen}
+              onToggle={toggleComments}
             />
-          </Suspense>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <Button
-                disabled={isSaving}
-                size="sm"
-                variant="ghost"
-                onClick={() => setIsEditing(false)}
-              >
-                {t("common.cancel")}
-              </Button>
-              <Button
-                disabled={isSaving || isUploadingInline || !draftContent.trim()}
-                size="sm"
-                onClick={() => void saveEditing()}
-              >
-                {isSaving && (
-                  <Loader2Icon
-                    className="animate-spin"
-                    data-icon="inline-start"
-                  />
-                )}
-                {t("common.save")}
-              </Button>
-            </div>
-          </div>
-        </div>
+          ) : null
+        }
+        memo={memo}
+        id={id}
+        isTrashed={isTrashed}
+        canManage={canManage}
+        canGovern={canGovern}
+        prefetchDetail={prefetchDetail}
+        onArchive={onArchive}
+        onHardDelete={onHardDelete}
+        onPin={onPin}
+        onRestore={onRestore}
+        onStartEditing={beginEditing}
+        onTrash={onTrash}
+        share={share}
+        onShare={onShare}
+        onRevokeShare={onRevokeShare}
+        onUpdateVisibility={changeVisibility}
+        onRequestDelete={onRequestDelete}
+        onRequestShareImage={onRequestShareImage}
+        onRequestVisibility={onRequestVisibility}
+      />
+      {isEditing ? (
+        <MemoCardEditor
+          content={draftContent}
+          isSaving={isSaving}
+          isUploadingInline={isUploadingInline}
+          setIsUploadingInline={setIsUploadingInline}
+          editorRef={editEditorRef}
+          memoName={memo.name}
+          onCancel={stopEditing}
+          onContentChange={setDraftContent}
+          onSave={saveEditing}
+        />
       ) : (
-        <div>
-          <div className="relative">
-            {/* biome-ignore lint/a11y/noStaticElementInteractions: the delegation only intercepts the markdown checkboxes, which are reachable natively. */}
-            {/* biome-ignore lint/a11y/useKeyWithClickEvents: checkboxes toggle with Space/Enter through native input click events, which this handler also serves. */}
-            <div
-              className={cn(
-                collapsed && "max-h-52 overflow-hidden",
-                !collapsed && "transition-[max-height]",
-              )}
-            >
-              <LazyMemoContent
-                content={memo.content}
-                interactiveTaskLists={canManage && taskCount > 0}
-                resolveImageDimensions={resolveImageDimensions}
-                onToggleTask={taskInteraction?.onToggleTask}
-                onConvertTask={taskInteraction?.onConvertTask}
-              />
-            </div>
-            {collapsed && (
-              <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-card to-transparent" />
-            )}
-          </div>
-          {isCollapsible && (
-            <Button
-              className="mt-1.5"
-              onClick={() => setExpanded((value) => !value)}
-              size="sm"
-              variant="ghost"
-            >
-              {collapsed ? t("reading.expand") : t("reading.collapse")}
-            </Button>
-          )}
-          {searchQuery && (
-            <MemoSearchExcerpt content={memo.content} query={searchQuery} />
-          )}
-          {galleryAttachments.length > 0 && (
-            <div className="mt-3">
-              <AttachmentGallery attachments={galleryAttachments} />
-            </div>
-          )}
-          {share && shareUrl && (
-            <div className="mt-3 rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
-              <a className="font-mono hover:text-foreground" href={shareUrl}>
-                {shareUrl}
-              </a>
-            </div>
-          )}
-        </div>
+        <MemoCardBody
+          attachments={attachments}
+          canManage={canManage}
+          expanded={expanded}
+          memo={memo}
+          onTagClick={onTagClick}
+          onToggleExpanded={() => setExpanded((value) => !value)}
+          searchQuery={searchQuery}
+          taskInteraction={taskInteraction}
+          canOpenThread={canOpenThread}
+        />
       )}
-      {(tags.length > 0 || memo.state !== "normal") && !isEditing && (
-        <footer className="flex flex-wrap items-center justify-between gap-2 pt-1">
-          <div className="flex flex-wrap gap-1.5">
-            {tags.map((tag) =>
-              onTagClick ? (
-                <button
-                  aria-label={`#${tag}`}
-                  className="cursor-pointer rounded-full motion-safe:transition-transform motion-safe:duration-150 motion-safe:hover:-translate-y-px"
-                  key={tag}
-                  type="button"
-                  onClick={() => onTagClick(tag)}
-                >
-                  <Badge
-                    className="transition-colors hover:bg-brand-200 dark:hover:bg-brand-400/20"
-                    variant="brand"
-                  >
-                    #{tag}
-                  </Badge>
-                </button>
-              ) : (
-                <Badge key={tag} variant="brand">
-                  #{tag}
-                </Badge>
-              ),
-            )}
-          </div>
-          <div className="ml-auto flex items-center gap-2">
-            {memo.state !== "normal" && (
-              <Badge variant="outline">{stateLabel(memo.state, t)}</Badge>
-            )}
-          </div>
-        </footer>
+      {commentsOpen && !isEditing && canOpenThread && (
+        <MemoComments
+          autoFocus={focusReply}
+          canComment
+          memoId={memo.id}
+          mentions={commentsEnabled && memo.visibility !== "private"}
+          variant="inline"
+        />
       )}
-      <AlertDialog
-        open={isDeleteDialogOpen}
-        onOpenChange={setIsDeleteDialogOpen}
-      >
-        <AlertDialogContent size="sm">
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t("memo.deleteConfirmTitle")}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {t("memo.deleteConfirmDescription")}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel variant="ghost">
-              {t("common.cancel")}
-            </AlertDialogCancel>
-            <AlertDialogAction
-              variant="destructive"
-              onClick={() => void onHardDelete(id)}
-            >
-              {t("memo.deleteForever")}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-      <Dialog open={isShareOpen} onOpenChange={setIsShareOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{t("share.title")}</DialogTitle>
-            <DialogDescription>{t("share.subtitle")}</DialogDescription>
-          </DialogHeader>
-          <div className="flex flex-col gap-1.5">
-            {(
-              [
-                ["private", LockIcon],
-                ["protected", ShieldIcon],
-                ["public", Globe2Icon],
-              ] as const
-            ).map(([value, Icon]) => {
-              const selected = shareVisibility === value;
-              return (
-                <button
-                  aria-pressed={selected}
-                  className={cn(
-                    "flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-left text-sm motion-safe:transition-colors",
-                    selected
-                      ? "border-brand-400/60 bg-brand-400/8"
-                      : "border-transparent bg-muted/40 hover:bg-muted",
-                  )}
-                  key={value}
-                  type="button"
-                  onClick={() => setShareVisibility(value)}
-                >
-                  <Icon
-                    className={cn(
-                      "mt-0.5 size-4 shrink-0",
-                      selected ? "text-brand-500" : "text-muted-foreground",
-                    )}
-                  />
-                  <span className="flex min-w-0 flex-col gap-0.5">
-                    <span className="font-medium">
-                      {t(`visibility.${value}`)}
-                    </span>
-                    <span
-                      className={cn(
-                        "text-xs",
-                        selected
-                          ? "text-muted-foreground"
-                          : "text-muted-foreground/80",
-                      )}
-                    >
-                      {t(`share.desc.${value}`)}
-                    </span>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-          {shareVisibility === "public" && shareUrl && (
-            <p className="truncate rounded-md bg-muted px-3 py-2 font-mono text-xs text-muted-foreground">
-              {shareUrl}
-            </p>
-          )}
-          <DialogFooter>
-            <Button
-              disabled={isSharing}
-              type="button"
-              variant="ghost"
-              onClick={() => setIsShareOpen(false)}
-            >
-              {t("common.cancel")}
-            </Button>
-            <Button
-              disabled={isSharing}
-              onClick={() => void saveSharing()}
-              type="button"
-            >
-              {isSharing && (
-                <Loader2Icon
-                  className="animate-spin"
-                  data-icon="inline-start"
-                />
-              )}
-              {t("share.confirm")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </article>
   );
 });
-
-/**
- * The timeline's voice-capture face (rollout §4.3, D5): a mic badge with the
- * recording length. Playback stays on the detail page — the card only
- * identifies the note as spoken.
- */
-function VoiceBadge({ memo }: { memo: Memo }) {
-  const { t } = useI18n();
-  const duration = memo.payload.durationSeconds;
-  return (
-    <Badge className="rounded-md" variant="outline" title={t("capture.title")}>
-      <MicIcon />
-      {typeof duration === "number" &&
-        Number.isFinite(duration) &&
-        duration > 0 && (
-          <span className="tabular-nums">{formatClock(duration)}</span>
-        )}
-    </Badge>
-  );
-}
-
-function VisibilityBadge({ visibility }: { visibility: MemoVisibility }) {
-  const { t } = useI18n();
-  const icon =
-    visibility === "public" ? (
-      <Globe2Icon />
-    ) : visibility === "protected" ? (
-      <ShieldIcon />
-    ) : (
-      <LockIcon />
-    );
-  const label =
-    visibility === "public"
-      ? t("visibility.public")
-      : visibility === "protected"
-        ? t("visibility.protected")
-        : t("visibility.private");
-  return (
-    <Badge className="rounded-md" variant="outline">
-      {icon}
-      {label}
-    </Badge>
-  );
-}
-
-function stateLabel(state: MemoState, t: ReturnType<typeof useI18n>["t"]) {
-  switch (state) {
-    case "archived":
-      return t("memo.stateArchived");
-    case "trashed":
-      return t("memo.stateTrashed");
-    case "deleted":
-      return t("memo.stateDeleted");
-    default:
-      return state;
-  }
-}

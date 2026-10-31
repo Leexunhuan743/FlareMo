@@ -11,7 +11,7 @@ export default defineConfig({
   // Every project shares one wrangler dev server and one auth state, so
   // parallel workers contend for the same D1 write lock — that contention is
   // what made the heaviest memo-flow case flake under load. Keep the run
-  // serial; 24 cases stay comfortably fast this way.
+  // serial; the suite stays comfortably fast this way.
   workers: 1,
   reporter: [["list"]],
   globalSetup: "./tests/e2e/global-setup.ts",
@@ -39,7 +39,7 @@ export default defineConfig({
       name: "memo-ui",
       dependencies: ["auth-ui"],
       testMatch:
-        /(memo-flow|memory-flow|capture-flow|voice-settings-flow|workspace-flow|space-flow)\.spec\.ts/,
+        /(memo-flow|memory-flow|voice-settings-flow|workspace-flow|space-flow|attachment-inline|audio-transcript-reading|todo-flow|workspace-shell)\.spec\.ts/,
       use: {
         ...devices["Desktop Chrome"],
         storageState: E2E_AUTH_STATE,

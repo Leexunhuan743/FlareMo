@@ -1,16 +1,24 @@
 import {
   applyFlaremoMigrations,
+  authMembers,
+  authOrganizations,
   authUsers,
   createDb,
   memos,
+  memoTags,
   type UserRow,
   users,
 } from "@flaremo/db";
 import { eq } from "drizzle-orm";
 import { Miniflare } from "miniflare";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { completeOwnerBootstrap, getViewerTeamMembership } from "./auth";
+import {
+  completeOwnerBootstrap,
+  getViewerTeamMembership,
+  listFlaremoUsersWithMemberships,
+} from "./auth";
 import { ConflictError, ForbiddenError, ValidationError } from "./errors";
+import { readHourlyCountTotals } from "./memo-hourly-counts";
 import { createMemo } from "./memos";
 import type { TeamViewer } from "./team-permissions";
 import {
@@ -21,6 +29,8 @@ import {
   finalizeFlaremoMemberRemoval,
   getDefaultTeam,
   getFlaremoUserById,
+  grantTeamReader,
+  revokeTeamReader,
   updateFlaremoUserEmail,
   updateTeamMemberRole,
 } from "./users";
@@ -69,8 +79,8 @@ async function createMember(
     authUserId,
     viewer: {
       ...member,
-      teamRole: membership!.role,
-      teamOrganizationId: membership!.organizationId,
+      teamRole: membership?.role,
+      teamOrganizationId: membership?.organizationId,
     },
   };
 }
@@ -144,7 +154,7 @@ describe("team users", () => {
       visibility: "protected",
       source: "web",
     });
-    expect(teamMemo.teamId).toBe(team!.id);
+    expect(teamMemo.teamId).toBe(team?.id);
 
     const personalMemo = await createMemo(db, member.viewer, {
       content: "personal",
@@ -152,6 +162,101 @@ describe("team users", () => {
       source: "web",
     });
     expect(personalMemo.teamId).toBeNull();
+  });
+
+  it("denies team publishing for readers but keeps personal notes working", async () => {
+    const member = await createMember("Reader");
+    await grantTeamReader(db, {
+      authUserId: member.authUserId,
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+    const membership = await getViewerTeamMembership(db, member.authUserId);
+    expect(membership).toMatchObject({ role: "reader" });
+    const reader = { ...member.viewer, teamRole: "reader" as const };
+
+    await expect(
+      createMemo(db, reader, {
+        content: "team",
+        visibility: "protected",
+        source: "web",
+      }),
+    ).rejects.toThrow(ForbiddenError);
+    // Personal notes stay fully available to the read-only seat.
+    const personal = await createMemo(db, reader, {
+      content: "personal",
+      visibility: "private",
+      source: "web",
+    });
+    expect(personal.teamId).toBeNull();
+  });
+
+  it("cuts off access automatically when the reader seat expires", async () => {
+    const member = await createMember("Lapsed");
+    // Grant, then lapse: the past-dated expiry folds the membership out at
+    // the single fail-closed gate (getViewerTeamMembership) — no cron needed.
+    await grantTeamReader(db, {
+      authUserId: member.authUserId,
+      expiresAt: new Date(Date.now() - 1000),
+    });
+    expect(await getViewerTeamMembership(db, member.authUserId)).toBeNull();
+
+    // Renewal from the admin restores access immediately.
+    await grantTeamReader(db, {
+      authUserId: member.authUserId,
+      expiresAt: new Date(Date.now() + 86_400_000),
+    });
+    expect(await getViewerTeamMembership(db, member.authUserId)).toMatchObject({
+      role: "reader",
+    });
+
+    // Revocation removes the membership row entirely.
+    await revokeTeamReader(db, member.authUserId);
+    expect(await getViewerTeamMembership(db, member.authUserId)).toBeNull();
+  });
+
+  it("joins admin users in one pass across unlinked and multi-org identities", async () => {
+    const mapped = await createMember("Mapped");
+    const unlinked = await createFlaremoMember(db, {
+      email: "unlinked@example.com",
+      name: "Unlinked",
+    });
+    const now = new Date();
+    await db.insert(authOrganizations).values({
+      id: "org/secondary",
+      name: "Secondary",
+      slug: "secondary",
+      logo: null,
+      metadata: null,
+      createdAt: now,
+    });
+    await db.insert(authMembers).values({
+      id: "member/secondary",
+      organizationId: "org/secondary",
+      userId: mapped.authUserId,
+      role: "admin",
+      expiresAt: null,
+      createdAt: now,
+    });
+
+    // Keep this above the D1 binding threshold to guard against a future
+    // per-user query or IN-list implementation in the admin read path.
+    for (let index = 0; index < 105; index += 1) {
+      await createFlaremoMember(db, {
+        email: `bulk-${index}@example.com`,
+        name: `Bulk ${index}`,
+      });
+    }
+
+    const rows = await listFlaremoUsersWithMemberships(db);
+    expect(rows).toHaveLength(108);
+    expect(rows.find((row) => row.user.id === unlinked.id)).toMatchObject({
+      authUser: null,
+      membership: null,
+    });
+    expect(rows.find((row) => row.user.id === mapped.id)).toMatchObject({
+      authUser: { id: mapped.authUserId },
+      membership: { role: "member" },
+    });
   });
 
   it("removes private data and adopts team content into the owner account", async () => {
@@ -162,7 +267,7 @@ describe("team users", () => {
       source: "web",
     });
     const teamMemo = await createMemo(db, member.viewer, {
-      content: "team",
+      content: "team #adopted",
       visibility: "protected",
       source: "web",
     });
@@ -170,6 +275,11 @@ describe("team users", () => {
     const artifacts = await beginFlaremoMemberRemoval(db, member.id);
     expect(artifacts.memoIds).toEqual([privateMemo.id]);
     expect((await getFlaremoUserById(db, member.id))?.status).toBe("removed");
+
+    // Both memos belong to the member's counter until the removal runs.
+    expect(await readHourlyCountTotals(db, member.id)).toMatchObject({
+      normal: 2,
+    });
 
     await finalizeFlaremoMemberRemoval(db, member.id, artifacts);
     const adopted = await db
@@ -182,6 +292,29 @@ describe("team users", () => {
       name: "Member",
       status: "removed",
     });
+
+    // The private memo was deleted and the team memo was adopted, so the
+    // member's counter must be empty and the owner's must count the adopted
+    // memo. Left to the nightly rebuild, the owner under-reports and the
+    // removed member keeps counting memos that no longer exist.
+    expect(await readHourlyCountTotals(db, member.id)).toMatchObject({
+      normal: 0,
+      activeDays: 0,
+    });
+    expect(await readHourlyCountTotals(db, "users/owner")).toMatchObject({
+      normal: 1,
+    });
+
+    // The adopted memo's tag row has to follow it. `memo_tags.user_id` is
+    // denormalized from the author, and the fast-path tag query filters on it
+    // while `counts` filters on `memos.user_id` — leaving them apart makes the
+    // owner see the adopted memo in `counts` but not in `tags`.
+    const adoptedTag = await db
+      .select()
+      .from(memoTags)
+      .where(eq(memoTags.memoId, teamMemo.id))
+      .get();
+    expect(adoptedTag).toMatchObject({ userId: "users/owner", tag: "adopted" });
   });
 
   it("supports assigning and removing the team administrator role", async () => {

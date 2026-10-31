@@ -7,22 +7,24 @@ import {
 } from "@tanstack/react-router";
 import { lazy, Suspense } from "react";
 import {
-  getCalendarView,
-  getDailyReview,
   getMemoContext,
   getRelatedMemos,
+  getTodayReview,
+  listArticles,
   listMemories,
   listProjects,
-  listTasks,
 } from "@/api";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { getInitialLocale, isRtlLocale, useI18n } from "@/i18n";
-import { buildMonthGrid, monthOf, todayKey } from "@/lib/calendar-date";
+import { isRtlLocale, useI18n } from "@/i18n";
+import { todayKey } from "@/lib/calendar-date";
+import { queryKeys } from "@/lib/query-keys";
+import { allTasksQuery, isTaskView, type TaskView } from "@/lib/task-views";
 import { AuthenticatedRoute } from "@/routes/authenticated-route";
 import { indexRoute } from "@/routes/index-route";
 import { rootRoute } from "@/routes/root-route";
 import { RouteLoading } from "@/routes/route-loading";
+import { workspaceRoute } from "@/routes/workspace-route";
 
 /**
  * Route loaders warm query caches without ever blocking navigation: a failed
@@ -108,14 +110,14 @@ const ProjectsPage = lazy(() =>
     default: module.ProjectsPage,
   })),
 );
-const CalendarPage = lazy(() =>
-  import("@/pages/calendar-page").then((module) => ({
-    default: module.CalendarPage,
+const ArticlesPage = lazy(() =>
+  import("@/pages/articles-page").then((module) => ({
+    default: module.ArticlesPage,
   })),
 );
-const CapturePage = lazy(() =>
-  import("@/pages/capture-page").then((module) => ({
-    default: module.CapturePage,
+const ArticleEditorPage = lazy(() =>
+  import("@/pages/article-editor-page").then((module) => ({
+    default: module.ArticleEditorPage,
   })),
 );
 
@@ -136,17 +138,11 @@ const shareRoute = createRoute({
 
 function MemoDetailRoutePage() {
   const { memoId } = memoRoute.useParams();
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <MemoDetailPage memoId={memoId} />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
+  return <MemoDetailPage memoId={memoId} />;
 }
 
 const memoRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => workspaceRoute,
   path: "/memo/$memoId",
   component: MemoDetailRoutePage,
   // Intent preload already warms the JS chunk; this warms the data so the
@@ -325,20 +321,19 @@ const accountRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/account",
   component: AccountRoutePage,
+  // Deep links (e.g. the capture page's "enable voice" hint) can open a
+  // specific settings section.
+  validateSearch: (search: Record<string, unknown>): { section?: string } => ({
+    section: typeof search.section === "string" ? search.section : undefined,
+  }),
 });
 
 function DailyReviewRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <DailyReviewPage />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
+  return <DailyReviewPage />;
 }
 
 const dailyReviewRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => workspaceRoute,
   path: "/review/daily",
   component: DailyReviewRoutePage,
   loader: ({ context }) => {
@@ -346,41 +341,29 @@ const dailyReviewRoute = createRoute({
     const tzOffset = -new Date().getTimezoneOffset();
     warmQuery(
       context.queryClient.ensureQueryData({
-        queryKey: ["daily-review", today, tzOffset],
-        queryFn: () => getDailyReview(today, tzOffset),
+        queryKey: queryKeys.review.today(today, tzOffset),
+        queryFn: () => getTodayReview(today, tzOffset),
       }),
     );
   },
 });
 
 function RandomWalkRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <RandomWalkPage />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
+  return <RandomWalkPage />;
 }
 
 const randomWalkRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => workspaceRoute,
   path: "/review/walk",
   component: RandomWalkRoutePage,
 });
 
 function MemoryRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <MemoryPage />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
+  return <MemoryPage />;
 }
 
 const memoryRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => workspaceRoute,
   path: "/memory",
   component: MemoryRoutePage,
   loader: ({ context }) => {
@@ -394,18 +377,23 @@ const memoryRoute = createRoute({
 });
 
 function ProjectsRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <ProjectsPage />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
+  return <ProjectsPage />;
 }
 
 const projectsRoute = createRoute({
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => workspaceRoute,
   path: "/projects",
+  // A to-do view (today / upcoming / all) or one project, so reminders and
+  // memo badges can deep-link to the exact list.
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { view?: TaskView; project?: string } => ({
+    view: isTaskView(search.view) ? search.view : undefined,
+    project:
+      typeof search.project === "string" && search.project
+        ? search.project
+        : undefined,
+  }),
   component: ProjectsRoutePage,
   loader: ({ context }) => {
     warmQuery(
@@ -415,69 +403,43 @@ const projectsRoute = createRoute({
       }),
     );
     // Same key as the board's default all-tasks view and the mini calendar.
-    warmQuery(
-      context.queryClient.ensureQueryData({
-        queryKey: ["tasks"],
-        queryFn: () => listTasks(),
-      }),
-    );
+    warmQuery(context.queryClient.ensureQueryData(allTasksQuery));
   },
 });
 
-function CalendarRoutePage() {
-  const { date } = calendarRoute.useSearch();
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <CalendarPage initialDate={date} />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
+function ArticlesRoutePage() {
+  return <ArticlesPage />;
 }
 
-function CaptureRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <CapturePage />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
-}
-
-const calendarRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/calendar",
-  component: CalendarRoutePage,
-  // Overdue reminders and search rows deep-link straight to a day panel.
-  validateSearch: (search: Record<string, unknown>) => ({
-    date:
-      typeof search.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(search.date)
-        ? search.date
-        : undefined,
-  }),
+const articlesRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "/articles",
+  component: ArticlesRoutePage,
   loader: ({ context }) => {
-    // Mirrors the page's initial month: today's cursor, week start from the
-    // stored locale, and the same tz convention the page passes. Warm data
-    // for exactly that key so first paint has the month grid.
-    const weekStart = getInitialLocale().startsWith("en") ? "sunday" : "monday";
-    const grid = buildMonthGrid(monthOf(todayKey()), weekStart);
-    const from = grid[0].key;
-    const to = grid[grid.length - 1].key;
-    const tz = new Date().getTimezoneOffset();
     warmQuery(
       context.queryClient.ensureQueryData({
-        queryKey: ["calendar", from, to, tz],
-        queryFn: () => getCalendarView({ from, to, tz }),
+        queryKey: ["articles"],
+        queryFn: () => listArticles({ include_deleted: true }),
       }),
     );
   },
 });
 
-const captureRoute = createRoute({
+function ArticleEditorRoutePage() {
+  const { articleId } = articleEditRoute.useParams();
+  return (
+    <AuthenticatedRoute>
+      <Suspense fallback={<RouteLoading />}>
+        <ArticleEditorPage articleId={articleId} />
+      </Suspense>
+    </AuthenticatedRoute>
+  );
+}
+
+const articleEditRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/capture",
-  component: CaptureRoutePage,
+  path: "/articles/$articleId/edit",
+  component: ArticleEditorRoutePage,
 });
 
 const router = createRouter({
@@ -487,8 +449,16 @@ const router = createRouter({
   // placeholder keeps route loader signatures aware of it.
   context: { queryClient: undefined as unknown as QueryClient },
   routeTree: rootRoute.addChildren([
-    indexRoute,
-    memoRoute,
+    // Pages beside the explorer sidebar share one persistent shell.
+    workspaceRoute.addChildren([
+      indexRoute,
+      memoRoute,
+      dailyReviewRoute,
+      randomWalkRoute,
+      memoryRoute,
+      projectsRoute,
+      articlesRoute,
+    ]),
     shareRoute,
     loginRoute,
     registerRoute,
@@ -499,12 +469,7 @@ const router = createRouter({
     recoverRoute,
     setupRoute,
     accountRoute,
-    dailyReviewRoute,
-    randomWalkRoute,
-    memoryRoute,
-    projectsRoute,
-    calendarRoute,
-    captureRoute,
+    articleEditRoute,
   ]),
   scrollRestoration: true,
 });

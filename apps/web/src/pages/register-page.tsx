@@ -10,8 +10,10 @@ import {
 import { authClient } from "@/auth-client";
 import { AuthPageFrame } from "@/components/auth-page-frame";
 import { CaptchaField } from "@/components/captcha-field";
+import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { useI18n } from "@/i18n";
 import { errorMessage } from "@/lib/error";
 
@@ -128,7 +130,7 @@ export function RegisterPage() {
             {t("auth.verifyEmailHint")}
           </p>
           {resent ? (
-            <p className="text-sm leading-6 text-emerald-700 dark:text-emerald-300">
+            <p className="text-sm leading-6 text-success-emphasis">
               {t("auth.resendVerificationSent")}
             </p>
           ) : (
@@ -156,22 +158,43 @@ export function RegisterPage() {
     );
   }
 
+  // Closed or not-yet-bootstrapped: a form that can only fail is noise, so
+  // show the reason and the way back instead.
+  const unavailable =
+    registrationClosed || bootstrapQuery.data?.initialized === false;
+  if (unavailable) {
+    return (
+      <AuthPageFrame title={t("auth.registerTitle")}>
+        <div className="flex flex-col gap-4" role="status">
+          <p className="text-sm leading-6 text-muted-foreground">
+            {registrationClosed
+              ? t("auth.registrationClosed")
+              : t("auth.registrationUnavailable")}
+          </p>
+          <Button render={<Link to="/login" />} variant="outline">
+            {t("auth.signIn")}
+          </Button>
+        </div>
+      </AuthPageFrame>
+    );
+  }
+
   return (
     <AuthPageFrame title={t("auth.registerTitle")}>
       {bootstrapQuery.data?.initialized === false && (
-        <p className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">
+        <Alert className="mb-4" role="status" variant="warning">
           {t("auth.registrationUnavailable")}
-        </p>
+        </Alert>
       )}
       {registrationClosed && (
-        <p className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">
+        <Alert className="mb-4" role="status" variant="warning">
           {t("auth.registrationClosed")}
-        </p>
+        </Alert>
       )}
       {(registrationQuery.isError || bootstrapQuery.isError) && (
-        <p className="mb-4 rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive">
+        <Alert className="mb-4" variant="destructive">
           {t("auth.registrationStatusUnavailable")}
-        </p>
+        </Alert>
       )}
       <form
         className="flex flex-col gap-4"
@@ -219,14 +242,13 @@ export function RegisterPage() {
             htmlFor="register-password"
           >
             {t("auth.password")}
-            <Input
+            <PasswordInput
               autoComplete="new-password"
               disabled={isSubmitting}
               id="register-password"
               minLength={MIN_PASSWORD_LENGTH}
               name="password"
               required
-              type="password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
             />
@@ -236,14 +258,13 @@ export function RegisterPage() {
             htmlFor="register-password-confirmation"
           >
             {t("auth.confirmPassword")}
-            <Input
+            <PasswordInput
               autoComplete="new-password"
               disabled={isSubmitting}
               id="register-password-confirmation"
               minLength={MIN_PASSWORD_LENGTH}
               name="password-confirmation"
               required
-              type="password"
               value={passwordConfirmation}
               onChange={(event) => setPasswordConfirmation(event.target.value)}
             />
@@ -268,11 +289,7 @@ export function RegisterPage() {
             />
           )
         )}
-        {formError && (
-          <p className="rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive">
-            {formError}
-          </p>
-        )}
+        {formError && <Alert variant="destructive">{formError}</Alert>}
         <Button disabled={isSubmitting} type="submit" variant="brand">
           {isSubmitting ? t("auth.registering") : t("auth.signUp")}
         </Button>
