@@ -13,10 +13,6 @@ import {
   memoRelations,
   memoReviewMarks,
   memoRevisions,
-  memoryItems,
-  memoryRelations,
-  memoryResourceLinks,
-  memoryRevisions,
   memos,
   memosNotifications,
   memosSseEvents,
@@ -45,7 +41,11 @@ import {
   or,
   sql,
 } from "drizzle-orm";
-import { chunkForD1, d1IdsPerStatement } from "./d1-limits";
+import {
+  chunkForD1,
+  d1IdsPerRepeatedBinding,
+  d1IdsPerStatement,
+} from "./d1-limits";
 import {
   ConflictError,
   ForbiddenError,
@@ -192,6 +192,25 @@ export async function getFlaremoUserById(
   id: string,
 ): Promise<UserRow | null> {
   return (await db.query.users.findFirst({ where: eq(users.id, id) })) ?? null;
+}
+
+/**
+ * Batch variant of `getFlaremoUserById` for maintenance sweeps: one query per
+ * D1 statement budget instead of one query per row. The trash purge used to
+ * look up an owner for every expired memo/article, which turns a large recycle
+ * bin into hundreds of serialized point reads.
+ */
+export async function getFlaremoUsersByIds(
+  db: FlareMoDb,
+  ids: readonly string[],
+): Promise<Map<string, UserRow>> {
+  const unique = [...new Set(ids)].filter((id) => id.length > 0);
+  const byId = new Map<string, UserRow>();
+  for (const chunk of chunkForD1(unique, d1IdsPerStatement())) {
+    const rows = await db.select().from(users).where(inArray(users.id, chunk));
+    for (const row of rows) byId.set(row.id, row);
+  }
+  return byId;
 }
 
 /**
@@ -451,7 +470,6 @@ export async function deriveUniqueUsername(
  */
 export type FlaremoAccountArtifacts = {
   memoIds: string[];
-  memoryIds: string[];
   attachmentR2Keys: string[];
 };
 
@@ -520,10 +538,6 @@ export async function beginFlaremoMemberRemoval(
     .from(memos)
     .where(and(eq(memos.userId, userId), eq(memos.visibility, "private")));
   const privateMemoIds = privateMemoRows.map((row) => row.id);
-  const memoryRows = await db
-    .select({ id: memoryItems.id })
-    .from(memoryItems)
-    .where(eq(memoryItems.userId, userId));
   const attachmentRows = await db
     .select({
       id: attachments.id,
@@ -540,7 +554,6 @@ export async function beginFlaremoMemberRemoval(
 
   return {
     memoIds: privateMemoIds,
-    memoryIds: memoryRows.map((row) => row.id),
     attachmentIds: privateAttachments.map((attachment) => attachment.id),
     attachmentR2Keys: privateAttachments.map((attachment) => attachment.key),
   };
@@ -605,12 +618,6 @@ export async function finalizeFlaremoMemberRemoval(
       ),
     db.delete(shortcuts).where(eq(shortcuts.userId, userId)),
     db.delete(memoReviewMarks).where(eq(memoReviewMarks.userId, userId)),
-    db
-      .delete(memoryResourceLinks)
-      .where(eq(memoryResourceLinks.userId, userId)),
-    db.delete(memoryRelations).where(eq(memoryRelations.userId, userId)),
-    db.delete(memoryRevisions).where(eq(memoryRevisions.userId, userId)),
-    db.delete(memoryItems).where(eq(memoryItems.userId, userId)),
   ]);
 
   if (privateMemoIds.length > 0) {
@@ -619,7 +626,12 @@ export async function finalizeFlaremoMemberRemoval(
     // outright past that count — the whole removal is one transaction body, so
     // there was no partial state to recover from either. Chunks are safe to
     // run sequentially because each one only ever narrows the same row set.
-    for (const idChunk of chunkForD1(privateMemoIds, d1IdsPerStatement(4))) {
+    // The relation delete below binds both `memo_id` and `related_memo_id`,
+    // so every id costs two parameters instead of one.
+    for (const idChunk of chunkForD1(
+      privateMemoIds,
+      d1IdsPerRepeatedBinding(2),
+    )) {
       await db.batch([
         db
           .delete(embeddingTasks)
@@ -651,14 +663,6 @@ export async function finalizeFlaremoMemberRemoval(
       await db.delete(attachments).where(inArray(attachments.id, idChunk));
     }
   }
-  await db
-    .delete(embeddingTasks)
-    .where(
-      and(
-        eq(embeddingTasks.userId, userId),
-        eq(embeddingTasks.resourceType, "memory"),
-      ),
-    );
 
   // Adopt the removed member's team/public memos. The client id is dropped
   // with the old owner so the owner's `(user_id, client_id)` idempotency
