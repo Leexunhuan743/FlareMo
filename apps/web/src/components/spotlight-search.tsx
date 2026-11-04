@@ -31,6 +31,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { Spinner } from "@/components/ui/spinner";
 import { useI18n } from "@/i18n";
 import { formatMemoRelativeTime, memoExcerpt } from "@/lib/memo";
+import { queryKeys } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
 
 export type SpotlightSearchProps = {
@@ -69,6 +70,11 @@ export function SpotlightSearch({
   const inputRef = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState(query);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  // Local filtering answers every keystroke; the network probe is debounced
+  // and paused while an IME composition is in flight, so typing Chinese does
+  // not fire one request per candidate character.
+  const [debouncedDraft, setDebouncedDraft] = useState("");
+  const [composing, setComposing] = useState(false);
 
   // Synchronize draft with query when opened
   useEffect(() => {
@@ -83,12 +89,18 @@ export function SpotlightSearch({
 
   const trimmedDraft = draft.trim();
 
+  useEffect(() => {
+    if (!open || composing) return undefined;
+    const timer = setTimeout(() => setDebouncedDraft(trimmedDraft), 250);
+    return () => clearTimeout(timer);
+  }, [composing, open, trimmedDraft]);
+
   // Instant global search probe across the entire corpus
   const remoteMemosQuery = useQuery({
-    queryKey: ["spotlight-remote-memos", trimmedDraft],
+    queryKey: queryKeys.spotlightRemoteMemos(debouncedDraft),
     queryFn: ({ signal }) =>
-      listMemos({ q: trimmedDraft, page_size: 6 }, signal),
-    enabled: open && trimmedDraft.length >= 1,
+      listMemos({ q: debouncedDraft, page_size: 6 }, signal),
+    enabled: open && debouncedDraft.length >= 1,
     staleTime: 10_000,
   });
 
@@ -109,14 +121,16 @@ export function SpotlightSearch({
   // immediately to memory cache so keystroke feedback is instant.
   const matchingMemos = useMemo(() => {
     if (!trimmedDraft) return [];
-    if (remoteMemosQuery.data?.memos) {
+    // Do not show the previous query's remote page while the current draft is
+    // still inside its debounce window; the local cache covers that gap.
+    if (debouncedDraft === trimmedDraft && remoteMemosQuery.data?.memos) {
       return remoteMemosQuery.data.memos.slice(0, 6);
     }
     const q = trimmedDraft.toLowerCase();
     return memos
       .filter((memo) => memo.content.toLowerCase().includes(q))
       .slice(0, 5);
-  }, [trimmedDraft, remoteMemosQuery.data, memos]);
+  }, [debouncedDraft, trimmedDraft, remoteMemosQuery.data, memos]);
 
   // Collect all selectable action items
   type SearchActionItem = {
@@ -290,11 +304,22 @@ export function SpotlightSearch({
             </InputGroupAddon>
             <InputGroupInput
               ref={inputRef}
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={actionItems.length > 0}
+              aria-controls="spotlight-results"
+              aria-activedescendant={
+                selectedIndex >= 0 && selectedIndex < actionItems.length
+                  ? `spotlight-option-${selectedIndex}`
+                  : undefined
+              }
               value={draft}
               onChange={(e) => {
                 setDraft(e.target.value);
                 setSelectedIndex(0);
               }}
+              onCompositionEnd={() => setComposing(false)}
+              onCompositionStart={() => setComposing(true)}
               onKeyDown={handleKeyDown}
               placeholder={
                 semanticMode
@@ -345,7 +370,12 @@ export function SpotlightSearch({
         </div>
 
         {/* Results / Suggestions List */}
-        <div className="max-h-[min(380px,50vh)] overflow-y-auto p-1.5">
+        <div
+          aria-label={t("search.spotlightPlaceholder")}
+          className="max-h-[min(380px,50vh)] overflow-y-auto p-1.5"
+          id="spotlight-results"
+          role="listbox"
+        >
           {actionItems.length > 0 ? (
             <div className="flex flex-col gap-0.5">
               {actionItems.map((item, idx) => {
@@ -354,11 +384,14 @@ export function SpotlightSearch({
                 return (
                   <button
                     key={item.id}
+                    id={`spotlight-option-${idx}`}
+                    role="option"
+                    aria-selected={isSelected}
                     type="button"
                     onClick={item.onExecute}
                     onMouseEnter={() => setSelectedIndex(idx)}
                     className={cn(
-                      "flex w-full cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2 text-left transition-colors duration-100",
+                      "flex w-full cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2 text-start transition-colors duration-100",
                       isSelected
                         ? "bg-accent text-accent-foreground"
                         : "text-foreground",
@@ -465,7 +498,7 @@ export function SpotlightSearchTrigger({
         {activeQuery ? (
           <span
             aria-hidden="true"
-            className="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-primary ring-2 ring-background"
+            className="absolute top-1.5 end-1.5 size-1.5 rounded-full bg-primary ring-2 ring-background"
           />
         ) : null}
       </Button>

@@ -1,5 +1,4 @@
 import type {
-  DailyReviewResponse,
   DeleteTagResponse,
   HourlyActivityResponse,
   ListMemosResponse,
@@ -13,6 +12,7 @@ import type {
   ReviewSettingsUpdate,
   TagHierarchyResponse,
   TodayReviewResponse,
+  TodayReviewSummaryResponse,
   WalkNextResponse,
 } from "@flaremo/contracts";
 import { apiRequest } from "./client";
@@ -136,16 +136,6 @@ export async function getHourlyActivity(
   );
 }
 
-export async function getDailyReview(date: string, tzOffsetMinutes: number) {
-  const query = new URLSearchParams({
-    date,
-    tzOffset: String(tzOffsetMinutes),
-  });
-  return apiRequest<DailyReviewResponse>(
-    `/api/app/review/daily?${query.toString()}`,
-  );
-}
-
 /** Today's review stack: on this day in past years, then the age ladder. */
 export async function getTodayReview(date: string, tzOffsetMinutes: number) {
   const query = new URLSearchParams({
@@ -154,6 +144,20 @@ export async function getTodayReview(date: string, tzOffsetMinutes: number) {
   });
   return apiRequest<TodayReviewResponse>(
     `/api/app/review/today?${query.toString()}`,
+  );
+}
+
+/** Count-only variant of the review deck, used by the timeline banner. */
+export async function getTodayReviewSummary(
+  date: string,
+  tzOffsetMinutes: number,
+) {
+  const query = new URLSearchParams({
+    date,
+    tzOffset: String(tzOffsetMinutes),
+  });
+  return apiRequest<TodayReviewSummaryResponse>(
+    `/api/app/review/today/summary?${query.toString()}`,
   );
 }
 
