@@ -7,14 +7,17 @@ import {
 import { DownloadIcon, RefreshCcwIcon, UploadIcon } from "lucide-react";
 import { useRef } from "react";
 import { toast } from "sonner";
-import { createImportTask, downloadExportJson } from "@/api";
+import { createImportTask, downloadExportJson, retryImportTask } from "@/api";
+import {
+  SettingsRow,
+  SettingsSectionGroup,
+} from "@/components/settings-section";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { type TranslationKey, useI18n } from "@/i18n";
 import { errorMessage } from "@/lib/error";
-import { SettingsRow, SettingsSectionGroup } from "./apple-settings-ui";
 
 type TransferPanelProps = {
   createExportIsPending: boolean;
@@ -35,6 +38,31 @@ export function TransferPanel({
 }: TransferPanelProps) {
   const importMutation = useImportBundle();
   const importInputRef = useRef<HTMLInputElement>(null);
+  const queryClient = useQueryClient();
+  // The prop form of `t` is unbound; interpolation needs the hook's variant.
+  const { t: translate } = useI18n();
+  const retryImportMutation = useMutation({
+    mutationFn: retryImportTask,
+    onSuccess: ({ task, result }) => {
+      if (task.status === "succeeded") {
+        toast.success(
+          translate("toast.importDone", { count: result.imported_memos }),
+        );
+      } else {
+        toast.error(
+          translate("toast.importFailed", {
+            message: task.error_message ?? task.status,
+          }),
+        );
+      }
+      void queryClient.invalidateQueries();
+    },
+    onError: (error) => {
+      toast.error(
+        errorMessage(error, translate("toast.importFailed", { message: "" })),
+      );
+    },
+  });
 
   return (
     <div className="flex flex-col gap-5">
@@ -173,6 +201,29 @@ export function TransferPanel({
                       {t("transfer.retry")}
                     </Button>
                   )}
+                  {task.status === "failed" && task.kind === "import" && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 text-xs"
+                      disabled={retryImportMutation.isPending}
+                      onClick={() => retryImportMutation.mutate(task.id)}
+                    >
+                      {retryImportMutation.isPending &&
+                      retryImportMutation.variables === task.id ? (
+                        <Spinner
+                          data-icon="inline-start"
+                          className="size-3.5"
+                        />
+                      ) : (
+                        <RefreshCcwIcon
+                          data-icon="inline-start"
+                          className="size-3.5"
+                        />
+                      )}
+                      {t("transfer.retry")}
+                    </Button>
+                  )}
                 </div>
               </div>
             ))}
@@ -218,6 +269,9 @@ function useImportBundle() {
           ? message
           : t("toast.importFailed", { message }),
       );
+      // The request failed but its task row may still exist with a rollback
+      // checkpoint, ready to retry from the list below.
+      void queryClient.invalidateQueries();
     },
   });
 }
