@@ -54,6 +54,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { useI18n } from "@/i18n";
+import { queryKeys } from "@/lib/query-keys";
 import { uploadAndInsertImages } from "@/lib/rich-editor-upload";
 import { cn } from "@/lib/utils";
 
@@ -91,7 +92,7 @@ export function ArticleEditorPage({ articleId }: { articleId: string }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const articleQuery = useQuery({
-    queryKey: ["article", articleId],
+    queryKey: queryKeys.articles.detail(articleId),
     queryFn: () => getArticle(articleId),
     retry: false,
   });
@@ -122,6 +123,9 @@ export function ArticleEditorPage({ articleId }: { articleId: string }) {
   const contentRef = useRef("");
   const seededRef = useRef(false);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Autosaves are chained instead of fired in parallel: two PATCHes in flight
+  // can return out of order and let the older body overwrite the newer one.
+  const saveChainRef = useRef<Promise<unknown>>(Promise.resolve());
   const savedArticleRef = useRef<Article | null>(null);
   savedArticleRef.current = savedArticle;
   const latestRef = useRef({ title: "", content: "" });
@@ -143,7 +147,15 @@ export function ArticleEditorPage({ articleId }: { articleId: string }) {
       updateArticle(articleId, patch),
     onSuccess: ({ article: updated }) => {
       setSavedArticle(updated);
-      setSaveState("saved");
+      // A queued save may still be behind this response; only claim "saved"
+      // when the persisted body matches what the editor currently holds.
+      const latest = latestRef.current;
+      setSaveState(
+        updated.title === latest.title &&
+          sameArticleBody(updated.content, latest.content)
+          ? "saved"
+          : "saving",
+      );
       queryClient.setQueryData(["article", articleId], { article: updated });
     },
     onError: () => {
@@ -181,8 +193,9 @@ export function ArticleEditorPage({ articleId }: { articleId: string }) {
       return;
     }
     setSaveState("saving");
-    void saveRef
-      .current({ title: next.title, content: next.content })
+    saveChainRef.current = saveChainRef.current
+      .catch(() => undefined)
+      .then(() => saveRef.current({ title: next.title, content: next.content }))
       .catch(() => undefined);
   }, []);
 
@@ -227,7 +240,7 @@ export function ArticleEditorPage({ articleId }: { articleId: string }) {
     mutationFn: () => deleteArticle(articleId),
     onSuccess: () => {
       toast.success(t("article.deleted"));
-      void queryClient.invalidateQueries({ queryKey: ["articles"] });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.articles.all });
       navigate({ to: "/articles" });
     },
     onError: () => toast.error(t("article.deleteFailed")),
@@ -451,11 +464,21 @@ export function ArticleEditorPage({ articleId }: { articleId: string }) {
           onOpenChange={setPublishOpen}
           onPublished={(updated) => {
             setSavedArticle(updated);
-            void queryClient.invalidateQueries({ queryKey: ["articles"] });
+            queryClient.setQueryData(["article", articleId], {
+              article: updated,
+            });
+            void queryClient.invalidateQueries({
+              queryKey: queryKeys.articles.all,
+            });
           }}
           onUnpublished={(updated) => {
             setSavedArticle(updated);
-            void queryClient.invalidateQueries({ queryKey: ["articles"] });
+            queryClient.setQueryData(["article", articleId], {
+              article: updated,
+            });
+            void queryClient.invalidateQueries({
+              queryKey: queryKeys.articles.all,
+            });
           }}
           open={publishOpen}
         />

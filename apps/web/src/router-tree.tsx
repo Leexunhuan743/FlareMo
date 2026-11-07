@@ -11,7 +11,6 @@ import {
   getRelatedMemos,
   getTodayReview,
   listArticles,
-  listMemories,
   listProjects,
 } from "@/api";
 import { Toaster } from "@/components/ui/sonner";
@@ -100,11 +99,6 @@ const RandomWalkPage = lazy(() =>
     default: module.RandomWalkPage,
   })),
 );
-const MemoryPage = lazy(() =>
-  import("@/pages/memory-page").then((module) => ({
-    default: module.MemoryPage,
-  })),
-);
 const ProjectsPage = lazy(() =>
   import("@/pages/projects-page").then((module) => ({
     default: module.ProjectsPage,
@@ -151,13 +145,13 @@ const memoRoute = createRoute({
   loader: ({ context, params }) => {
     warmQuery(
       context.queryClient.ensureQueryData({
-        queryKey: ["memo-context", params.memoId],
+        queryKey: queryKeys.memoContext.forMemo(params.memoId),
         queryFn: () => getMemoContext(params.memoId),
       }),
     );
     warmQuery(
       context.queryClient.ensureQueryData({
-        queryKey: ["memo-related", params.memoId],
+        queryKey: queryKeys.memoRelated.forMemo(params.memoId),
         queryFn: () => getRelatedMemos(params.memoId),
       }),
     );
@@ -358,24 +352,6 @@ const randomWalkRoute = createRoute({
   component: RandomWalkRoutePage,
 });
 
-function MemoryRoutePage() {
-  return <MemoryPage />;
-}
-
-const memoryRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "/memory",
-  component: MemoryRoutePage,
-  loader: ({ context }) => {
-    warmQuery(
-      context.queryClient.ensureQueryData({
-        queryKey: ["memories", "list"],
-        queryFn: () => listMemories(),
-      }),
-    );
-  },
-});
-
 function ProjectsRoutePage() {
   return <ProjectsPage />;
 }
@@ -398,7 +374,7 @@ const projectsRoute = createRoute({
   loader: ({ context }) => {
     warmQuery(
       context.queryClient.ensureQueryData({
-        queryKey: ["projects"],
+        queryKey: queryKeys.projects.all,
         queryFn: () => listProjects(),
       }),
     );
@@ -418,7 +394,7 @@ const articlesRoute = createRoute({
   loader: ({ context }) => {
     warmQuery(
       context.queryClient.ensureQueryData({
-        queryKey: ["articles"],
+        queryKey: queryKeys.articles.all,
         queryFn: () => listArticles({ include_deleted: true }),
       }),
     );
@@ -455,7 +431,6 @@ const router = createRouter({
       memoRoute,
       dailyReviewRoute,
       randomWalkRoute,
-      memoryRoute,
       projectsRoute,
       articlesRoute,
     ]),
