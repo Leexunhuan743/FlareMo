@@ -919,7 +919,13 @@ export const restPaths = {
           type: "object",
           properties: {
             description: { type: "string" },
-            expiresInDays: { type: "integer", minimum: 0, maximum: 365 },
+            expiresInDays: {
+              type: "integer",
+              minimum: 0,
+              maximum: 365,
+              description:
+                "Omitted defaults to 365 days. Explicit 0 creates a non-expiring token; only notes-scoped tokens may use it.",
+            },
           },
         }),
       },
@@ -1088,6 +1094,23 @@ export const restPaths = {
       responses: {
         "202": response("Import task accepted.", { type: "object" }),
         "413": response("An attachment exceeds the upload budget.", error),
+      },
+    }),
+  },
+  "/api/v1/import/tasks/{id}/retry": {
+    post: secured({
+      operationId: "retryImportTask",
+      summary: "Retry a failed import from its stored bundle",
+      tags: ["ImportExport"],
+      parameters: [
+        { name: "id", in: "path", required: true, schema: { type: "string" } },
+      ],
+      responses: {
+        "202": response("Import task accepted.", { type: "object" }),
+        "400": response("The task cannot be retried.", error),
+        "404": response("Task not found.", error),
+        "409": response("The task is not in a failed state.", error),
+        "410": response("The stored bundle has expired.", error),
       },
     }),
   },
