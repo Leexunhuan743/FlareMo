@@ -29,6 +29,11 @@ export const attachments = sqliteTable(
     filename: text("filename").notNull(),
     contentType: text("content_type"),
     size: integer("size").notNull().default(0),
+    // Bytes of the derived preview object stored beside `r2Key`. Kept apart
+    // from `size` (the original file) because the public attachment DTO and
+    // Memos-compatible clients expect `size` to describe the uploaded file,
+    // while the storage quota must count both objects.
+    thumbnailSize: integer("thumbnail_size").notNull().default(0),
     state: text("state", {
       enum: ["ready", "deleting", "missing"],
     })
@@ -45,6 +50,8 @@ export const attachments = sqliteTable(
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     deletedAt: text("deleted_at"),
+    // Optimistic-lock / sync version (migration 0048). See memos.version.
+    version: integer("version").notNull().default(1),
   },
   (table) => [
     index("attachments_user_created_idx").on(table.userId, table.createdAt),
@@ -62,10 +69,11 @@ export const attachments = sqliteTable(
       table.createdAt,
     ),
     // `getAttachmentStorageBytes` runs on every upload to check the storage
-    // quota, and it only needs `size` for ready rows. Without `size` in the
-    // index every quota check table-looks-up the user's whole attachment set.
+    // quota. It sums both the original size and the derived thumbnail size for
+    // ready rows, so both columns must live in the partial index; otherwise
+    // every quota check table-looks-up the user's whole attachment set.
     index("attachments_user_state_size_idx")
-      .on(table.userId, table.size)
+      .on(table.userId, table.size, table.thumbnailSize)
       .where(sql`${table.state} = 'ready'`),
     // The cleanup cron scans globally on this predicate (deleting rows or
     // orphaned unbound attachments); keep the sweep off a full table scan.
@@ -116,6 +124,8 @@ export const articles = sqliteTable(
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     deletedAt: text("deleted_at"),
+    // Optimistic-lock / sync version (migration 0048). See memos.version.
+    version: integer("version").notNull().default(1),
   },
   (table) => [
     uniqueIndex("articles_slug_idx").on(table.slug),

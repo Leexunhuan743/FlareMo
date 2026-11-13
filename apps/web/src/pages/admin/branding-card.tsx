@@ -15,6 +15,7 @@ import {
   uploadAdminBrandingMark,
 } from "@/api";
 import { type BrandingAccent, setAccentAttribute } from "@/branding";
+import { SettingsSectionGroup } from "@/components/settings-section";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -29,7 +30,6 @@ import { useI18n } from "@/i18n";
 import { normalizeHexColor } from "@/lib/brand-ramp";
 import { errorMessage } from "@/lib/error";
 import { queryKeys } from "@/lib/query-keys";
-import { SettingsSectionGroup } from "../account/apple-settings-ui";
 import {
   ACCENT_SWATCH_HEX,
   AccentPicker,
@@ -362,6 +362,10 @@ export function BrandingCard() {
       </SettingsSectionGroup>
       <SettingsSectionGroup title={t("admin.branding.identity")}>
         <button
+          aria-label={`${t("common.edit")}: ${
+            brandingQuery.data?.product_name ||
+            t("admin.branding.statusDefault")
+          }`}
           type="button"
           onClick={() => setEditOpen(true)}
           className="flex w-full cursor-pointer items-center gap-3 px-3.5 py-3 text-start transition-colors hover:bg-accent/40 active:bg-accent/60"
